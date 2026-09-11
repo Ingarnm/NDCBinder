@@ -248,7 +248,7 @@ The writer works from a Blueprint-only actor or component, with no C++ class beh
    bind menu says so explicitly when it is missing.
 4. Write the functions as ordinary Blueprint functions — `T Func()` or `T Func(<your struct> EventData)`
    — then bind the rows to them.
-5. Call **Write To Data Channel**. `Owner` defaults to Self; connect your struct straight into
+5. Call **Write With NDC Binder**. `Owner` defaults to Self; connect your struct straight into
    `Event Data` — the pin is a wildcard and reads the graph's own struct where it sits, with no
    **Make Instanced Struct** in between. To push several elements in one write, use **Write Many To
    Data Channel**, whose `Event Data` is a wildcard array.
@@ -457,7 +457,7 @@ all of at once:
 Writer.WriteToChannel(World, this, Payloads);   // TConstArrayView<FConstStructView>
 ```
 
-and from a graph, **Write Many To Data Channel**, taking an array of instanced structs. The rows do
+and from a graph, **Write Many With NDC Binder**, taking an array of instanced structs. The rows do
 not change: each element's are evaluated against its own payload, so a row reading an event data
 field or calling a getter gets that element's value. What the batch shares is the access context,
 built once from the first element — which also means the **context rows run once for the whole
@@ -583,13 +583,13 @@ holds; the function-row column is the one that shrinks.
 - `WriteToChannel` takes either one payload or an array of them; the array form emits one element per
   entry in a single write, which is 2.5× cheaper than that many single writes because Niagara's
   per-write path and this writer's context pass are then paid once. Blueprint gets the same through
-  **Write Many To Data Channel**. `BeginWrite` + `WriteBindings` is the same thing with the scope left
+  **Write Many With NDC Binder**. `BeginWrite` + `WriteBindings` is the same thing with the scope left
   in the caller's hands.
 - The Blueprint node's **Event Data pin is a wildcard, and nothing is copied into it**: the thunk reads
   the property and its address off the VM stack, so the write sees the graph's own struct — connect a
   cue's Parameters straight to it. Boxing that into an `FInstancedStruct` first would deep copy the
   struct on every write; an `FInstancedStruct` connected there anyway is unwrapped, so a payload that
-  arrived boxed still costs nothing extra. **Write Many To Data Channel** takes a wildcard *array* the
+  arrived boxed still costs nothing extra. **Write Many With NDC Binder** takes a wildcard *array* the
   same way — the graph's own `TArray` of any struct, viewed element by element — so the 2.5× a batch
   is worth arrives from a graph whole, rather than paying a box per element on the way in.
 - The access context is two-way: the channel writes back the handler systems a write spawned or
@@ -648,7 +648,7 @@ the plugin's own name after it:
 
 The one deliberate exception is `UK2Node_NDCWriteToDataChannel`, which follows the engine's
 `K2Node_<what the node does>` convention rather than the plugin's: it is named after the Blueprint node
-an author sees, `Write To Data Channel`.
+an author sees, `Write With NDC Binder`.
 
 
 ## License

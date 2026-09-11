@@ -69,8 +69,8 @@ public:
 	//~ data" has to stay sayable by connecting nothing. See that node.
 	UFUNCTION(BlueprintCallable, CustomThunk, BlueprintInternalUseOnly, Category = "Niagara Data Channel|Binder",
 		meta = (DefaultToSelf = "Owner", CustomStructureParam = "EventData", AutoCreateRefTerm = "EventData",
-			DisplayName = "Write To Data Channel"))
-	static bool WriteToDataChannel(const FNDCBinder& Writer, UObject* Owner, const int32& EventData);
+			DisplayName = "Write With NDC Binder"))
+	static bool WriteToDataChannel(const FNDCBinder& Binder, UObject* Owner, const int32& EventData);
 	DECLARE_FUNCTION(execWriteToDataChannel);
 
 	/**
@@ -103,8 +103,8 @@ public:
 	//~ Niagara's buffer and the channel's write guard until it is destroyed, and a Blueprint graph that
 	//~ branched away from its End node would hold both for the rest of the frame. One call cannot.
 	UFUNCTION(BlueprintCallable, CustomThunk, Category = "Niagara Data Channel|Binder",
-		meta = (DefaultToSelf = "Owner", ArrayParm = "EventData", DisplayName = "Write Many To Data Channel"))
-	static bool WriteManyToDataChannel(const FNDCBinder& Writer, UObject* Owner, const TArray<int32>& EventData);
+		meta = (DefaultToSelf = "Owner", ArrayParm = "EventData", DisplayName = "Write Many With NDC Binder"))
+	static bool WriteManyToDataChannel(const FNDCBinder& Binder, UObject* Owner, const TArray<int32>& EventData);
 	DECLARE_FUNCTION(execWriteManyToDataChannel);
 
 	/**

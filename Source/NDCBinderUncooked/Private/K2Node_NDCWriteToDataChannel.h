@@ -1,6 +1,6 @@
 // K2Node_NDCWriteToDataChannel.h
 //
-// The Write To Data Channel node, for the one thing a plain call node cannot do: leave its Event Data
+// The Write With NDC Binder node, for the one thing a plain call node cannot do: leave its Event Data
 // pin unconnected.
 //
 // The pin is a wildcard so that a graph can hand the write its own struct without boxing it. But a

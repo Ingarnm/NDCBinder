@@ -1424,14 +1424,16 @@ bool FNDCBinderBlueprintSurfaceTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	const FProperty* const WriterParam = WriteNode->FindPropertyByName(TEXT("Writer"));
-	if (!WriterParam)
+	// The pin an author connects the binder to, by name: it is what the node shows, so renaming it
+	// silently would orphan the connection in every graph that placed the node.
+	const FProperty* const BinderParam = WriteNode->FindPropertyByName(TEXT("Binder"));
+	if (!BinderParam)
 	{
-		AddError(TEXT("the Blueprint write node no longer takes a parameter named Writer"));
+		AddError(TEXT("the Blueprint write node no longer takes a parameter named Binder"));
 		return false;
 	}
-	TestTrue(TEXT("the Blueprint write node takes the writer by const reference"),
-		WriterParam->HasAllPropertyFlags(CPF_ConstParm | CPF_ReferenceParm));
+	TestTrue(TEXT("the Blueprint write node takes the binder by const reference"),
+		BinderParam->HasAllPropertyFlags(CPF_ConstParm | CPF_ReferenceParm));
 
 	return true;
 }

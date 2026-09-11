@@ -89,7 +89,7 @@ struct FNDCBinderTestContext
 	 * against a belief about what one looks like.
 	 */
 	UPROPERTY()
-	FVector Corners[2];
+	FVector Corners[2] = { FVector::ZeroVector, FVector::ZeroVector };
 };
 
 /** A second struct type, to prove the parameter is matched by type and not just "some struct". */
