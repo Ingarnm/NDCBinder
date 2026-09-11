@@ -1,0 +1,14 @@
+# Build output. A plugin ships as source; whoever takes it builds it with their project.
+Binaries/
+Intermediate/
+Saved/
+
+# Editor and tooling leftovers.
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.opendb
+DerivedDataCache/

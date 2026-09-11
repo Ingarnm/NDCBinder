@@ -1,0 +1,5 @@
+# Normalise line endings in the repository and check out native ones. The plugin left its parent
+# project with a mix of both; this settles it without anyone having to configure core.autocrlf.
+* text=auto
+
+*.png binary
