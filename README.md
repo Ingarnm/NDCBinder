@@ -87,18 +87,15 @@ T Func();
 T Func(const FEventData& EventData);   // only when Event Data Type is set
 ```
 
-It must be `const` or Pure, and must not be editor-only, replicated, or a delegate signature.
-
-`T` must match the row's type. Nothing coerces, apart from a child struct sliced to its parent and a
-soft object reference resolved.
+| | |
+| --- | --- |
+| Signature | `const` or Pure. Not editor-only, replicated, or a delegate signature |
+| Return type | matches the row's type. Nothing coerces, apart from a child struct sliced to its parent and a soft object reference resolved |
+| Event data parameter | by const reference. By value copies the struct per call, and a mutable reference is refused. Use **Create Binding**, which the graph editor cannot express by hand |
 
 Row types are the twelve Niagara's own Blueprint writer covers: bool, int32, float, vector2D, vector,
 vector4, quat, linear color, position, enum, spawn info and id. Any other channel variable shows as
 unsupported and is skipped.
-
-Take event data **by const reference**. By value copies the struct on every call, and a mutable
-reference is refused. **Create Binding** writes the correct signature; the graph editor cannot express
-it by hand.
 
 Event data fields may be **nested**, so a row can read `EffectContext.Origin`. A path stops at a
 struct. A **static array** member cannot be bound at all: bind a getter returning the element you
@@ -120,6 +117,9 @@ They do not serialize, so there is no constant to author.
 | non-null | the field takes it |
 | null, Required | the whole write is skipped |
 | null, not Required | the authored value stands |
+
+Only a genuine null answer declines a write. A broken binding never does: the row is skipped and the
+authored value stands.
 
 **Gated fields keep their checkbox.** A write never ticks `bOverrideSystemToSpawn` for you. Bind a
 field whose checkbox is clear and the row is marked to say the channel will ignore it.
@@ -144,18 +144,18 @@ Stale rows are kept rather than removed, so putting a variable back revives its 
 the top of *Payload*, clears out rows the channel has no place for. It appears only when there is
 something to remove, and it is undoable.
 
-A broken binding never turns a write off, even a required one: the row is skipped and the authored
-value stands. Only a genuine null answer declines a write.
+## Benchmark
 
-## What it costs
+A benchmark ships with the plugin, so its costs do not have to be taken on trust. It measures a bound
+row against the same work written by hand, a whole write against the parts it is made of, and one
+write of several elements against the same elements written one at a time.
 
-Binding costs less than the write it feeds. A row on an event data field is a member read; a row on a
-function is a reflected call, which is why event data bindings are the shape to reach for. Over half
-of a write on a simple channel is Niagara's own per-write path, which nothing here changes. Emitting
-several elements in one write does.
+In the editor it runs as `NDCBinder.Performance.BindingOverhead`. From the command line it runs in any
+configuration, Shipping included, where the automation framework does not exist:
 
-The benchmark ships with the plugin. It runs as `NDCBinder.Performance.BindingOverhead` in the editor,
-or from the command line in any configuration, Shipping included, with `-ndcbench=<report file>`.
+```
+<YourGame>.exe <YourProject>.uproject -ndcbench="C:/path/report.txt" -unattended -nullrhi
+```
 
 ## Modules
 
