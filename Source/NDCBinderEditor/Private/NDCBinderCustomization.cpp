@@ -34,6 +34,7 @@
 #include "ScopedTransaction.h"
 #include "SourceCodeNavigation.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "SResetToDefaultPropertyEditor.h"
 #include "Styling/AppStyle.h"
 #include "Styling/StyleColors.h"
 #include "Widgets/Images/SImage.h"
@@ -493,6 +494,60 @@ namespace NDCBinderCustomizationPrivate
 	{
 		return FNDCBinder::IsBindingStale(Row, ChannelVarNames) && Row.HasAuthoredContent();
 	}
+
+	/**
+	 * Gives a payload row the revert arrow it has a column for and nothing to put in it.
+	 *
+	 * A widget row gets no arrow: reset-to-default belongs to property rows, and this panel draws one
+	 * row per channel variable by hand. Without this the only arrow is on the Bindings array as a
+	 * whole, so a child Blueprint that changed ONE row can revert all of them or none.
+	 *
+	 * The engine's widget rather than a button of our own: it words its own tooltip and resets through
+	 * the handle, which is what keeps the transaction and the propagation down to instances.
+	 *
+	 * WHAT IT REVERTS TO is the row this asset INHERITED — the parent Blueprint's row for this
+	 * variable, with its binding, its source and its constants.
+	 *
+	 * ONLY WHERE THE NAME STILL MATCHES, and that restriction is the whole of it. Reset on a container
+	 * element lines the element up with its counterpart BY SLOT, and there is no public way to ask a
+	 * handle what the archetype holds. Rows are synced from the channel in channel order, so slot N is
+	 * normally the same variable in parent and child — normally, but not when the parent has not been
+	 * opened since the channel changed, or when either of them carries a stale row at the end. The
+	 * row's own VarName answers it: if that does not differ from its default, the counterpart at this
+	 * slot is the same variable and the reset is the one the author expects.
+	 *
+	 * KNOWN GAP, deliberately left here rather than papered over: on a Blueprint VARIABLE's Default
+	 * Value panel this offers an arrow on rows nobody has edited. That panel edits a FStructOnScope
+	 * and has no archetype at all, so its default is a freshly constructed FNDCBinder with no rows and
+	 * every row differs from it; the VarName check does not catch it because the engine's "this
+	 * element is not in the default" test lives on the element's own node and never reaches a child of
+	 * it. An attempt to answer this by reading the archetype directly was worse on both counts — it
+	 * left the context rows as they were and made the payload rows wrong — so this stands as it is.
+	 */
+	static void BindRowResetToDefault(FDetailWidgetRow& Row, const TSharedRef<IPropertyHandle>& BindingHandle)
+	{
+		TSharedPtr<IPropertyHandle> VarNameHandle = BindingHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, VarName));
+
+		const FResetToDefaultOverride OnlyWhenTheNameMatches = FResetToDefaultOverride::Create(
+			FIsResetToDefaultVisible::CreateLambda([VarNameHandle](TSharedPtr<IPropertyHandle> Handle)
+			{
+				return Handle.IsValid() && Handle->DiffersFromDefault()
+					&& VarNameHandle.IsValid() && !VarNameHandle->DiffersFromDefault();
+			}),
+			FResetToDefaultHandler::CreateLambda([](TSharedPtr<IPropertyHandle> Handle)
+			{
+				if (Handle.IsValid())
+				{
+					Handle->ResetToDefault();
+				}
+			}));
+
+		Row.ResetToDefaultContent()
+		[
+			SNew(SResetToDefaultPropertyEditor, BindingHandle).CustomResetToDefault(OnlyWhenTheNameMatches)
+		];
+	}
+
 
 	/**
 	 * Gives a payload row the Copy and Paste its context menu offers but cannot perform.
@@ -1883,6 +1938,78 @@ namespace NDCBinderCustomizationPrivate
 		return Array->GetElement(Index);
 	}
 
+	/**
+	 * Gives a context row an arrow that reverts the whole row, not half of it.
+	 *
+	 * The value of such a field lives in the access context and gets the engine's arrow for free; the
+	 * BINDING lives in another array entirely and had none, so a child that rebound a field could
+	 * revert what the field holds and not what computes it. Same split as copy and paste had, same
+	 * answer: a row is what it holds, and reverting it reverts all of it.
+	 *
+	 * The binding element is found by name at the moment the arrow is used, not captured when the row
+	 * is built, because binding and unbinding add and remove it underneath. The same slot restriction
+	 * as the payload rows applies to it, asked of its own FieldName — a binding the parent does not
+	 * have at all has no counterpart to line up with, so that half stays hidden while the value half
+	 * still works.
+	 *
+	 * The binding is reset FIRST. Writing the value rebuilds the panel under this row and leaves the
+	 * handles it captured answering for a layout that is gone; that is the same ordering that cost a
+	 * round on paste, and it costs nothing to get right here.
+	 *
+	 * FieldHandle is null on a Transient field, which has no value to author and so no property row:
+	 * there the binding is the whole row, and the arrow reverts just that.
+	 */
+	static void BindContextRowResetToDefault(FDetailWidgetRow& Row, TSharedPtr<IPropertyHandle> Rows, FName FieldName, TSharedPtr<IPropertyHandle> FieldHandle)
+	{
+		//~ Both halves ask this, so the rule for "the binding can be reverted" is written once.
+		auto BindingToReset = [Rows, FieldName]() -> TSharedPtr<IPropertyHandle>
+		{
+			if (!Rows.IsValid())
+			{
+				return nullptr;
+			}
+			TSharedPtr<IPropertyHandle> RowHandle = FindContextRow(Rows.ToSharedRef(), FieldName);
+			if (!RowHandle.IsValid() || !RowHandle->DiffersFromDefault())
+			{
+				return nullptr;
+			}
+			TSharedPtr<IPropertyHandle> NameHandle = RowHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FNDCContextBinding, FieldName));
+			return (NameHandle.IsValid() && !NameHandle->DiffersFromDefault()) ? RowHandle : nullptr;
+		};
+
+		const FResetToDefaultOverride ValueAndBinding = FResetToDefaultOverride::Create(
+			FIsResetToDefaultVisible::CreateLambda([BindingToReset](TSharedPtr<IPropertyHandle> Handle)
+			{
+				const bool bValueDiffers = Handle.IsValid() && Handle->DiffersFromDefault();
+				return bValueDiffers || BindingToReset().IsValid();
+			}),
+			FResetToDefaultHandler::CreateLambda([BindingToReset](TSharedPtr<IPropertyHandle> Handle)
+			{
+				if (TSharedPtr<IPropertyHandle> BindingRow = BindingToReset())
+				{
+					BindingRow->ResetToDefault();
+				}
+				if (Handle.IsValid() && Handle->DiffersFromDefault())
+				{
+					Handle->ResetToDefault();
+				}
+			}));
+
+		//~ The widget needs a handle to hang on, and hands it back to both lambdas above. The field's
+		//~ own where there is one; otherwise the bindings array, which those lambdas ignore — they find
+		//~ their element by name.
+		TSharedPtr<IPropertyHandle> Anchor = FieldHandle.IsValid() ? FieldHandle : Rows;
+		if (!Anchor.IsValid())
+		{
+			return;
+		}
+
+		Row.ResetToDefaultContent()
+		[
+			SNew(SResetToDefaultPropertyEditor, Anchor).CustomResetToDefault(ValueAndBinding)
+		];
+	}
+
 	/** What FieldName is bound to, or nothing when it has no row. */
 	static FBoundTo GetContextRowBinding(const TSharedRef<IPropertyHandle>& RowsHandle, FName FieldName)
 	{
@@ -2163,6 +2290,7 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 
 		FDetailWidgetRow& Row = PayloadGroup.AddWidgetRow();
 		BindRowCopyPaste(Row, BindingHandle, VarName, Type, Binding->EnumDef, /*bPasteAllowed=*/ !bStale && Type != ENDCVariableType::Unsupported);
+		BindRowResetToDefault(Row, BindingHandle);
 		Row
 		.FilterString(FText::FromName(VarName))
 		.NameContent()
@@ -2601,6 +2729,7 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 			// the binding is what they carry.
 			FDetailWidgetRow& TransientRow = ContextGroup.AddWidgetRow();
 			BindBindingCopyPaste(TransientRow, GetCurrent, OnPickBinding);
+			BindContextRowResetToDefault(TransientRow, Rows, FieldName, /*FieldHandle=*/ nullptr);
 			TransientRow
 			.FilterString(Field.GetDisplayNameText())
 			.NameContent()
@@ -2660,6 +2789,8 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 		// the field copied like any property — because of those lines doing nothing, not because of
 		// them doing something. Binding real actions here turns that fallback off, so anything not
 		// implemented here is simply gone, as the field's values briefly were.
+		BindContextRowResetToDefault(Row, Rows, FieldName, FieldHandle);
+
 		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([GetCurrent, FieldHandle]()
 		{
 			if (const FBoundTo Bound = GetCurrent(); Bound.IsBound())
