@@ -429,4 +429,74 @@ bool FNDCBinderContextEnableFlagTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+/**
+ * What a paste into a payload row carries, and what it must not.
+ *
+ * A row's name and type are the channel's, synced onto it and never authored. The clipboard holds a
+ * whole row including those, so the one thing this cannot be allowed to do is move them: a row that
+ * took its name from a paste would collide with the row that name belongs to, and the next sync would
+ * be handed an array with two of one and none of the other.
+ *
+ * Falsified by dropping each of the three repairs and by accepting text that is not a row.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FNDCBinderRowPasteTest,
+	"NDCBinder.Editor.RowPaste",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FNDCBinderRowPasteTest::RunTest(const FString& Parameters)
+{
+	using namespace NDCBinderCustomizationPrivate;
+
+	// What Copy puts on the clipboard: a row bound to a getter, with constants of more than one type
+	// sitting on it, so the test can tell "the whole row travelled" from "the live value did".
+	FNDCVariableBinding Copied;
+	Copied.VarName = TEXT("MuzzlePosition");
+	Copied.Type = ENDCVariableType::Position;
+	Copied.EnumDef = StaticEnum<ENDCValueSource>();
+	Copied.Source = ENDCValueSource::Function;
+	Copied.BoundFunction = TEXT("GetMuzzlePosition");
+	Copied.BoundEventDataField = TEXT("Origin");
+	Copied.VectorValue = FVector(1.0, 2.0, 3.0);
+	Copied.FloatValue = 7.0;
+
+	FString Clipboard;
+	FNDCVariableBinding::StaticStruct()->ExportText(Clipboard, &Copied, nullptr, nullptr, PPF_None, nullptr);
+	TestFalse(TEXT("the row exports to something"), Clipboard.IsEmpty());
+
+	// Pasted onto a row of a different name, a different type and a different enum — all three are
+	// what must survive the paste unchanged.
+	UEnum* const TargetEnum = StaticEnum<ENDCVariableType>();
+	FString PastedText;
+	TestTrue(TEXT("a copied row is accepted"),
+		MakePastedRowText(Clipboard, TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, PastedText));
+
+	FNDCVariableBinding Pasted;
+	FNDCVariableBinding::StaticStruct()->ImportText(*PastedText, &Pasted, nullptr, PPF_None, GLog, FNDCVariableBinding::StaticStruct()->GetName());
+
+	TestEqual(TEXT("the target keeps its own name"), Pasted.VarName, FName(TEXT("ImpactNormal")));
+	TestEqual(TEXT("and its own type"), Pasted.Type, ENDCVariableType::Float);
+	TestEqual(TEXT("and its own enum"), (const UEnum*)Pasted.EnumDef, (const UEnum*)TargetEnum);
+
+	TestEqual(TEXT("the source travels"), Pasted.Source, ENDCValueSource::Function);
+	TestEqual(TEXT("so does the function it names"), Pasted.BoundFunction, FName(TEXT("GetMuzzlePosition")));
+	TestEqual(TEXT("and the field it names, which is live again if the row is switched back"),
+		Pasted.BoundEventDataField, FName(TEXT("Origin")));
+	TestEqual(TEXT("every constant travels, not just the one the source type reads"),
+		Pasted.VectorValue, FVector(1.0, 2.0, 3.0));
+	TestEqual(TEXT("including the one the target's type will read"), Pasted.FloatValue, 7.0);
+
+	// Anything else on the clipboard leaves the row alone. Asked of the return value because that is
+	// what stops the caller writing: a paste that half-applied would be worse than one that does
+	// nothing.
+	FString Untouched;
+	TestFalse(TEXT("text that is not a row is refused"),
+		MakePastedRowText(TEXT("just some text"), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
+	TestFalse(TEXT("an empty clipboard is refused"),
+		MakePastedRowText(FString(), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
+	TestTrue(TEXT("and neither leaves anything behind to write"), Untouched.IsEmpty());
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

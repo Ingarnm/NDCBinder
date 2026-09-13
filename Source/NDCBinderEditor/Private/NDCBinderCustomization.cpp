@@ -21,6 +21,8 @@
 #include "Engine/Blueprint.h"
 #include "Features/IModularFeatures.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "Misc/OutputDeviceNull.h"
 #include "IPropertyAccessEditor.h"
 #include "HAL/FileManager.h"
 #include "K2Node_Event.h"
@@ -490,6 +492,93 @@ namespace NDCBinderCustomizationPrivate
 	static bool IsStaleAndDrawn(const FNDCVariableBinding& Row, const TSet<FName>& ChannelVarNames)
 	{
 		return FNDCBinder::IsBindingStale(Row, ChannelVarNames) && Row.HasAuthoredContent();
+	}
+
+	/**
+	 * Gives a payload row the Copy and Paste its context menu offers but cannot perform.
+	 *
+	 * Those entries belong to the property row this deliberately is not — a row per channel variable,
+	 * drawn from the array by hand — so without this the menu shows them greyed out with nothing
+	 * behind them. FDetailWidgetRow::CopyAction/PasteAction is the supported hook for that, the one
+	 * FMatrixStructCustomization binds its composed rows with.
+	 *
+	 * What travels is the WHOLE row — its source, what it is bound to, and every constant on it — so a
+	 * getter moves between rows with the value it falls back to, rather than a bare number moving on
+	 * its own.
+	 *
+	 * BOTH actions are bound even where paste is refused, because the menu appears only when both are
+	 * (FDetailWidgetRow::IsCopyPasteBound). Paste declines through its CanExecute instead, which
+	 * leaves Copy working where it is most wanted: on a stale row, which is one somebody may want to
+	 * read the value out of before pressing the bin.
+	 */
+	static void BindRowCopyPaste(FDetailWidgetRow& Row, const TSharedRef<IPropertyHandle>& BindingHandle, FName VarName, ENDCVariableType Type, UEnum* EnumDef, bool bPasteAllowed)
+	{
+		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([BindingHandle]()
+		{
+			FString Value;
+			if (BindingHandle->GetValueAsFormattedString(Value) == FPropertyAccess::Success)
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*Value);
+			}
+		})));
+
+		Row.PasteAction(FUIAction(
+			FExecuteAction::CreateLambda([BindingHandle, VarName, Type, EnumDef]()
+			{
+				FString Clipboard;
+				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
+
+				FString Repaired;
+				if (MakePastedRowText(Clipboard, VarName, Type, EnumDef, Repaired))
+				{
+					BindingHandle->SetValueFromFormattedString(Repaired);
+				}
+			}),
+			FCanExecuteAction::CreateLambda([bPasteAllowed]() { return bPasteAllowed; })));
+	}
+
+	/**
+	 * The row that a paste should write, or false when the clipboard is not one.
+	 *
+	 * Parsed into a row of our own first, because the clipboard holds whatever was last copied
+	 * anywhere on the machine: text that is not a binding has to leave the target alone rather than
+	 * half-written, and ImportText answering null is how that is known.
+	 *
+	 * The repair is the point. VarName, Type and EnumDef are the CHANNEL's, synced onto the row and
+	 * never authored, so a paste that carried them would rename one row to another — leaving the array
+	 * with two of one name and none of the other for the next sync to argue with. Handing the incoming
+	 * row the target's identity back, before anything is written, keeps the paste to one edit with no
+	 * moment in between where the row is called something else.
+	 *
+	 * Pasting across types is allowed and lands on its feet: the constant read at write time is
+	 * whichever field the TARGET's type names, and a binding that no longer returns the right thing is
+	 * exactly what the validator reports and the panel marks red. Refusing it here would be a second,
+	 * quieter opinion about what a usable row is.
+	 */
+	bool MakePastedRowText(const FString& Clipboard, FName VarName, ENDCVariableType Type, UEnum* EnumDef, FString& OutText)
+	{
+		if (Clipboard.IsEmpty())
+		{
+			return false;
+		}
+
+		// Errors swallowed rather than logged: text that is not a binding is the ordinary case for a
+		// clipboard, not a fault, and the paste doing nothing is the whole of what needs saying. GLog
+		// here would also put an Error in the output of every automation run that covers this.
+		FOutputDeviceNull Discard;
+
+		FNDCVariableBinding Incoming;
+		if (!FNDCVariableBinding::StaticStruct()->ImportText(*Clipboard, &Incoming, nullptr, PPF_None, &Discard, FNDCVariableBinding::StaticStruct()->GetName()))
+		{
+			return false;
+		}
+
+		Incoming.VarName = VarName;
+		Incoming.Type = Type;
+		Incoming.EnumDef = EnumDef;
+
+		FNDCVariableBinding::StaticStruct()->ExportText(OutText, &Incoming, nullptr, nullptr, PPF_None, nullptr);
+		return true;
 	}
 
 	/** True when something is bound, so the row's constant is not what goes out. */
@@ -1785,6 +1874,7 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 		TSharedRef<IPropertyHandle> SourceHandle = BindingHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, Source)).ToSharedRef();
 
 		FDetailWidgetRow& Row = PayloadGroup.AddWidgetRow();
+		BindRowCopyPaste(Row, BindingHandle, VarName, Type, Binding->EnumDef, /*bPasteAllowed=*/ !bStale && Type != ENDCVariableType::Unsupported);
 		Row
 		.FilterString(FText::FromName(VarName))
 		.NameContent()

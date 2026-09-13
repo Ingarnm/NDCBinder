@@ -300,10 +300,20 @@ private:
  */
 struct FNDCFieldCache
 {
-	/** True when this cache already holds the answer for these inputs; OutField is then it, possibly null. */
-	bool TryGet(const UScriptStruct* Owner, const FProperty*& OutField, ENDCVariableType ValueType = ENDCVariableType::Unsupported, const UEnum* ValueEnum = nullptr, int32* OutOffset = nullptr) const
+	/**
+	 * True when this cache already holds the answer for these inputs; OutField is then it, possibly null.
+	 *
+	 * FieldName is required rather than defaulted, and is the answer to the one way this went wrong:
+	 * every caller resolves a NAME the row stores, and a row's name can be changed by whoever is
+	 * editing it. Keyed on everything the lookup depended on except the name, a rebound row kept
+	 * answering with the field it used to name — the edit appeared to do nothing until the object
+	 * holding it was rebuilt. A defaulted parameter would let the next caller opt out of that check
+	 * without noticing they had.
+	 */
+	bool TryGet(const UScriptStruct* Owner, FName FieldName, const FProperty*& OutField, ENDCVariableType ValueType = ENDCVariableType::Unsupported, const UEnum* ValueEnum = nullptr, int32* OutOffset = nullptr) const
 	{
-		if (bResolved && Owner && CachedOwner.Get() == Owner && CachedValueType == ValueType
+		if (bResolved && Owner && CachedOwner.Get() == Owner && CachedFieldName == FieldName
+			&& CachedValueType == ValueType
 			&& CachedValueEnum == ValueEnum
 #if WITH_EDITOR
 			&& CachedValueEnumWeak.Get() == ValueEnum
@@ -321,13 +331,14 @@ struct FNDCFieldCache
 	}
 
 	/** Remembers the answer. A null Field is remembered too — a row that resolves to nothing stays cheap to skip. */
-	void Store(const UScriptStruct* Owner, const FProperty* Field, ENDCVariableType ValueType = ENDCVariableType::Unsupported, const UEnum* ValueEnum = nullptr, int32 Offset = 0) const
+	void Store(const UScriptStruct* Owner, FName FieldName, const FProperty* Field, ENDCVariableType ValueType = ENDCVariableType::Unsupported, const UEnum* ValueEnum = nullptr, int32 Offset = 0) const
 	{
 		if (!CanRemember(Owner))
 		{
 			return;
 		}
 		CachedOwner = Owner;
+		CachedFieldName = FieldName;
 		CachedValueType = ValueType;
 		CachedValueEnum = ValueEnum;
 #if WITH_EDITOR
@@ -357,6 +368,17 @@ private:
 
 	/** Weak so a collected struct reads back as null and misses, rather than matching a recycled address. */
 	mutable TWeakObjectPtr<const UScriptStruct> CachedOwner;
+	/**
+	 * The name the remembered field was resolved from.
+	 *
+	 * Not editor-only, unlike the weak enum below, and the difference is deliberate: that one guards a
+	 * pointer a recompile can delete, which cannot happen outside the editor at all. A row's name is
+	 * only unreachable outside it, today, because nothing rewrites a row in place — InitBindings hands
+	 * over fresh rows with empty caches. Leaving a correctness key resting on that would be a trap for
+	 * whoever adds the path that does. It costs one name comparison, in a check that already resolves
+	 * a weak pointer.
+	 */
+	mutable FName CachedFieldName;
 	/**
 	 * The channel variable type the remembered field was accepted for, where the answer depends on one.
 	 *

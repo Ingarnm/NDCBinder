@@ -53,6 +53,16 @@ namespace NDCBinderCustomizationPrivate
 	/** True when the settings say this panel draws no row for this field of this context type. */
 	bool IsHiddenContextField(const UScriptStruct* ContextType, const FProperty& Field);
 
+	/**
+	 * The whole of what pasting into a payload row does, short of writing it: read the clipboard,
+	 * refuse it when it is not a row, and hand the incoming row the target's identity back.
+	 *
+	 * Apart from the panel because the repair carries the invariant worth holding — VarName, Type and
+	 * EnumDef are the channel's and must never arrive from a clipboard — and a context menu is not
+	 * something a test can press.
+	 */
+	bool MakePastedRowText(const FString& Clipboard, FName VarName, ENDCVariableType Type, UEnum* EnumDef, FString& OutText);
+
 	/** How many functions on the class would bind if an Event Data Type were declared. */
 	int32 CountFunctionsNeedingEventDataType(
 		const FNDCBinder& Writer,

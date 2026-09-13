@@ -33,6 +33,8 @@ public class NDCBinderEditor : ModuleRules
 				"DataValidation",
 				// UNDCBinderEditorSettings: which access context inputs the panel leaves out.
 				"DeveloperSettings",
+				// FPlatformApplicationMisc, for the clipboard behind a payload row's Copy and Paste.
+				"ApplicationCore",
 				"Niagara",
 			}
 			);

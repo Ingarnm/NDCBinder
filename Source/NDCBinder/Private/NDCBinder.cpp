@@ -1381,10 +1381,10 @@ bool FNDCBinder::ApplyContextBinding(const FNDCContextBinding& Binding, FNDCAcce
 	// Resolved once per context type rather than once per write. FindPropertyByName walks the struct's
 	// property list comparing FNames, and this row's name and struct are both fixed.
 	const FProperty* Field = nullptr;
-	if (!Binding.FieldCache.TryGet(ContextType, Field))
+	if (!Binding.FieldCache.TryGet(ContextType, Binding.FieldName, Field))
 	{
 		Field = ContextType->FindPropertyByName(Binding.FieldName);
-		Binding.FieldCache.Store(ContextType, Field);
+		Binding.FieldCache.Store(ContextType, Binding.FieldName, Field);
 	}
 	if (!Field)
 	{
@@ -1403,20 +1403,21 @@ bool FNDCBinder::ApplyContextBinding(const FNDCContextBinding& Binding, FNDCAcce
 	UFunction* Func = nullptr;
 	if (bFromEventData)
 	{
-		// The field is looked up by name — the row stores a bare name and the struct it refers to can
-		// change underneath it, which is what the cache is keyed on — but the TYPE is not checked here.
-		// The store below answers the same question as a side effect of doing the work, and asking it
-		// twice walked the whole property-kind chain twice for every row of every write.
+		// The field is looked up by name — the row stores a bare name, and both the name and the struct
+		// it refers to can change underneath the answer, so the cache is keyed on both — but the TYPE
+		// is not checked here. The store below answers the same question as a side effect of doing the
+		// work, and asking it twice walked the whole property-kind chain twice for every row of every
+		// write.
 		const FProperty* EventField = nullptr;
 		int32 EventFieldOffset = 0;
-		if (!Binding.EventFieldCache.TryGet(EventDataType, EventField, ENDCVariableType::Unsupported, nullptr, &EventFieldOffset))
+		if (!Binding.EventFieldCache.TryGet(EventDataType, Binding.BoundEventDataField, EventField, ENDCVariableType::Unsupported, nullptr, &EventFieldOffset))
 		{
 			if (!ResolveFieldPath(EventDataType, Binding.BoundEventDataField, EventField, EventFieldOffset))
 			{
 				EventField = nullptr;
 				EventFieldOffset = 0;
 			}
-			Binding.EventFieldCache.Store(EventDataType, EventField, ENDCVariableType::Unsupported, nullptr, EventFieldOffset);
+			Binding.EventFieldCache.Store(EventDataType, Binding.BoundEventDataField, EventField, ENDCVariableType::Unsupported, nullptr, EventFieldOffset);
 		}
 		if (!EventField)
 		{
@@ -1512,13 +1513,13 @@ bool FNDCBinder::ApplyContextBinding(const FNDCContextBinding& Binding, FNDCAcce
 	// are all remembered as null, so the write path is one pointer test rather than a name walk, a
 	// cast and a flag test.
 	const FProperty* TransientFlag = nullptr;
-	if (!Binding.TransientFlagCache.TryGet(ContextType, TransientFlag))
+	if (!Binding.TransientFlagCache.TryGet(ContextType, Binding.EnableFlagField, TransientFlag))
 	{
 		const FBoolProperty* Flag = Binding.EnableFlagField.IsNone()
 			? nullptr
 			: CastField<FBoolProperty>(ContextType->FindPropertyByName(Binding.EnableFlagField));
 		TransientFlag = (Flag && Flag->HasAnyPropertyFlags(CPF_Transient)) ? Flag : nullptr;
-		Binding.TransientFlagCache.Store(ContextType, TransientFlag);
+		Binding.TransientFlagCache.Store(ContextType, Binding.EnableFlagField, TransientFlag);
 	}
 	if (TransientFlag)
 	{
@@ -1927,7 +1928,7 @@ void FNDCBinder::WriteBindingsInternal(FNDCWriteScope& Scope, int32 Index, const
 			// already explained by then.
 			const FProperty* Field = nullptr;
 			int32 FieldOffset = 0;
-			if (!Binding.EventFieldCache.TryGet(EventDataType, Field, Binding.Type, Binding.EnumDef, &FieldOffset))
+			if (!Binding.EventFieldCache.TryGet(EventDataType, Binding.BoundEventDataField, Field, Binding.Type, Binding.EnumDef, &FieldOffset))
 			{
 				if (!ResolveFieldPath(EventDataType, Binding.BoundEventDataField, Field, FieldOffset)
 					|| !IsPropertyCompatibleWithVariableType(Field, Binding.Type, Binding.EnumDef))
@@ -1938,7 +1939,7 @@ void FNDCBinder::WriteBindingsInternal(FNDCWriteScope& Scope, int32 Index, const
 					Field = nullptr;
 					FieldOffset = 0;
 				}
-				Binding.EventFieldCache.Store(EventDataType, Field, Binding.Type, Binding.EnumDef, FieldOffset);
+				Binding.EventFieldCache.Store(EventDataType, Binding.BoundEventDataField, Field, Binding.Type, Binding.EnumDef, FieldOffset);
 			}
 			if (!Field)
 			{

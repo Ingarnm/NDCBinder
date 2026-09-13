@@ -212,7 +212,7 @@ bool FNDCBinderChannelSyncTest::RunTest(const FString& Parameters)
 	Writer.GetMutableBindingsUnchecked()[0].Source = ENDCValueSource::EventData;
 	Writer.GetMutableBindingsUnchecked()[0].BoundEventDataField = TEXT("Location");
 	const FProperty* LocationField = Writer.FindEventDataField(TEXT("Location"));
-	Writer.GetBindings()[0].EventFieldCache.Store(Writer.GetEventDataType(), LocationField, ENDCVariableType::Vector);
+	Writer.GetBindings()[0].EventFieldCache.Store(Writer.GetEventDataType(), TEXT("Location"), LocationField, ENDCVariableType::Vector);
 
 	Writer.DataChannel = MakeChannelAsset({ { TEXT("Position"), FloatType } });
 	Writer.SyncBindingsWithChannel();
@@ -220,7 +220,7 @@ bool FNDCBinderChannelSyncTest::RunTest(const FString& Parameters)
 
 	const FProperty* Cached = nullptr;
 	TestFalse(TEXT("what was remembered for the old type no longer matches"),
-		Writer.GetBindings()[0].EventFieldCache.TryGet(Writer.GetEventDataType(), Cached, Writer.GetBindings()[0].Type));
+		Writer.GetBindings()[0].EventFieldCache.TryGet(Writer.GetEventDataType(), TEXT("Location"), Cached, Writer.GetBindings()[0].Type));
 #endif
 	return true;
 }
@@ -360,29 +360,36 @@ bool FNDCBinderFieldCacheTest::RunTest(const FString& Parameters)
 	FNDCFieldCache Cache;
 	const FProperty* Out = nullptr;
 
-	TestFalse(TEXT("an empty cache answers nothing"), Cache.TryGet(EventStruct, Out));
+	TestFalse(TEXT("an empty cache answers nothing"), Cache.TryGet(EventStruct, TEXT("Location"), Out));
 
-	Cache.Store(EventStruct, Field);
-	TestTrue(TEXT("what was stored comes back"), Cache.TryGet(EventStruct, Out));
+	Cache.Store(EventStruct, TEXT("Location"), Field);
+	TestTrue(TEXT("what was stored comes back"), Cache.TryGet(EventStruct, TEXT("Location"), Out));
 	TestEqual(TEXT("and it is the same property"), Out, Field);
 
 	// Every input the answer depends on is part of the key, so nothing has to remember to invalidate.
 	Out = nullptr;
-	TestFalse(TEXT("a different struct misses"), Cache.TryGet(OtherStruct, Out));
-	TestFalse(TEXT("a different value type misses"), Cache.TryGet(EventStruct, Out, ENDCVariableType::Float));
-	TestFalse(TEXT("no struct at all misses"), Cache.TryGet(nullptr, Out));
+	TestFalse(TEXT("a different struct misses"), Cache.TryGet(OtherStruct, TEXT("Location"), Out));
+	TestFalse(TEXT("a different value type misses"), Cache.TryGet(EventStruct, TEXT("Location"), Out, ENDCVariableType::Float));
+	TestFalse(TEXT("no struct at all misses"), Cache.TryGet(nullptr, TEXT("Location"), Out));
+
+	// The name is one of those inputs, and was the one left out. Every caller resolves a name its row
+	// stores, and a row is rebound by whoever is editing it without its struct or its type moving —
+	// so without this the cache went on answering with the field the row used to name, and the edit
+	// looked like it had done nothing until the object holding it was rebuilt.
+	TestFalse(TEXT("a different field name misses"), Cache.TryGet(EventStruct, TEXT("Corners"), Out));
+	TestFalse(TEXT("and so does no name at all"), Cache.TryGet(EventStruct, NAME_None, Out));
 
 	// A remembered null is an answer too: a row that resolves to nothing stays cheap to skip.
 	FNDCFieldCache MissCache;
-	MissCache.Store(EventStruct, nullptr);
+	MissCache.Store(EventStruct, TEXT("NoSuchField"), nullptr);
 	Out = Field;
-	TestTrue(TEXT("a remembered miss is an answer"), MissCache.TryGet(EventStruct, Out));
+	TestTrue(TEXT("a remembered miss is an answer"), MissCache.TryGet(EventStruct, TEXT("NoSuchField"), Out));
 	TestNull(TEXT("and the answer is nothing"), Out);
 
 	// Storing against no struct stores nothing, rather than storing under a null key.
 	FNDCFieldCache NullOwnerCache;
-	NullOwnerCache.Store(nullptr, Field);
-	TestFalse(TEXT("nothing is remembered against a null struct"), NullOwnerCache.TryGet(EventStruct, Out));
+	NullOwnerCache.Store(nullptr, TEXT("Location"), Field);
+	TestFalse(TEXT("nothing is remembered against a null struct"), NullOwnerCache.TryGet(EventStruct, TEXT("Location"), Out));
 
 	return true;
 }
@@ -590,13 +597,14 @@ bool FNDCBinderEnumIdentityTest::RunTest(const FString& Parameters)
 	// "this field will do" would otherwise outlive the question it answered.
 	FNDCFieldCache Cache;
 	const FProperty* Cached = nullptr;
-	Cache.Store(EnumContext, Typed, ENDCVariableType::Enum, Wanted);
+	const FName TypedName = Typed->GetFName();
+	Cache.Store(EnumContext, TypedName, Typed, ENDCVariableType::Enum, Wanted);
 	TestTrue(TEXT("the remembered field comes back for the enum it was stored under"),
-		Cache.TryGet(EnumContext, Cached, ENDCVariableType::Enum, Wanted));
+		Cache.TryGet(EnumContext, TypedName, Cached, ENDCVariableType::Enum, Wanted));
 	TestFalse(TEXT("but not for a row that now wants a different enum"),
-		Cache.TryGet(EnumContext, Cached, ENDCVariableType::Enum, Other));
+		Cache.TryGet(EnumContext, TypedName, Cached, ENDCVariableType::Enum, Other));
 	TestFalse(TEXT("nor for one that now wants none"),
-		Cache.TryGet(EnumContext, Cached, ENDCVariableType::Enum));
+		Cache.TryGet(EnumContext, TypedName, Cached, ENDCVariableType::Enum));
 
 	return true;
 }
@@ -1986,6 +1994,34 @@ bool FNDCBinderEndToEndWriteTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the write claimed exactly two elements"), Data->Num(), Base + 2);
 
 	Scope.End();
+
+	// The rebind the field cache used to miss, checked where it actually went wrong: on a writer whose
+	// cache is warm from the write above. Pointing a row somewhere else changes neither its type nor
+	// its event data struct, so a cache that did not ask for the NAME kept handing back the field the
+	// row named before, and the edit looked like it had done nothing.
+	//
+	// Rebound to a field that does not exist because the test event data has one bindable vector, and
+	// that is enough: the row must now resolve to nothing and be skipped. Writing Location here would
+	// be the bug, and is what this asks about — not what a skipped row leaves in the buffer, which is
+	// Niagara's business.
+	Writer.GetMutableBindingsUnchecked()[0].BoundEventDataField = TEXT("NoSuchField");
+
+	FNDCWriteScope Rebound;
+	if (TestTrue(TEXT("a write opens after a row is rebound"),
+		Writer.BeginWrite(Rebound, World, Context, /*Count=*/ 1, Host)))
+	{
+		Writer.WriteBindings(Rebound, /*Index=*/ 0, Host, FConstStructView::Make(First));
+
+		FVector Written = FVector::ZeroVector;
+		if (const FNiagaraDataChannelGameDataPtr& ReboundData = Rebound.GetData(); ReboundData.IsValid())
+		{
+			ReboundData->Read<FVector>(Writer.VarOffsets[0], Rebound.GetStartIndex(), Written, /*bPreviousFrame=*/ false);
+		}
+		TestFalse(TEXT("a rebound row no longer writes the field it used to name"), Written == First.Location);
+		Rebound.End();
+	}
+
+	Writer.GetMutableBindingsUnchecked()[0].BoundEventDataField = TEXT("Location");
 
 	// And the one-element convenience, which is what every cue in the project actually calls.
 	TestTrue(TEXT("the single-element form writes too"),
