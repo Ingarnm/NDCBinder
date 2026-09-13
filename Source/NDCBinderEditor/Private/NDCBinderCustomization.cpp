@@ -7,6 +7,7 @@
 #include "NiagaraDataChannel_GameplayBurst.h"
 
 #include "DetailLayoutBuilder.h"
+#include "PropertyCustomizationHelpers.h"
 #include "DetailWidgetRow.h"
 #include "IDetailChildrenBuilder.h"
 #include "IDetailGroup.h"
@@ -460,6 +461,19 @@ namespace NDCBinderCustomizationPrivate
 		return BindingHandle->GetValueData(RawData) == FPropertyAccess::Success
 			? static_cast<const FNDCVariableBinding*>(RawData)
 			: nullptr;
+	}
+
+	/**
+	 * True when this row is one of the stale rows the panel draws and the compiler fails the asset for.
+	 *
+	 * Both halves are the validator's own, asked through the same two functions rather than restated
+	 * here: a stale row holding nothing does not survive the sync above, so marking one would be
+	 * promising a compile error that never comes. What this marks is exactly what ValidateBindings
+	 * reports.
+	 */
+	static bool IsStaleAndDrawn(const FNDCVariableBinding& Row, const TSet<FName>& ChannelVarNames)
+	{
+		return FNDCBinder::IsBindingStale(Row, ChannelVarNames) && Row.HasAuthoredContent();
 	}
 
 	/** True when something is bound, so the row's constant is not what goes out. */
@@ -1683,72 +1697,41 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 	// other where it goes, and reading them as one list makes neither question easy to answer.
 	IDetailGroup& PayloadGroup = ChildBuilder.AddGroup("NDCPayload", LOCTEXT("PayloadGroup", "Payload"), /*bStartExpanded=*/ true);
 
-	// The way out of a stale row.
+	// A stale row — one the channel has no variable for, with something bound to it — fails the
+	// compile of the asset carrying it, so this line is here to say why, in the same place the author
+	// is looking when it happens.
 	//
-	// A row whose variable the channel no longer has is kept rather than deleted, and that is right:
-	// an author who removes a variable by accident finds their binding waiting when they put it back.
-	// What was missing is the other half — pruning only ever happened on a channel SWITCH, so a
-	// variable removed from the channel a writer already points at left a greyed row with nothing to
-	// do about it but switch away and back. Offered only when there is something to remove, so the
-	// common panel is unchanged.
-	//
-	// The count is the writer's own, which is also what the button acts on: rows the access context no
-	// longer has a field for are stale too and are removed as well, and those have no row of their own
-	// here to see. Saying "rows" rather than "the rows above" is the honest wording for that.
+	// Counted by IsStaleAndDrawn, which is the compiler's own condition rather than an approximation
+	// of it: this line claims a compile failure, so the two have to be the same claim. Two kinds of
+	// stale row are deliberately absent — an unbound one and a context row whose field is gone are
+	// both dropped by the sync, neither being anything an author asked for.
 	int32 NumStale = 0;
-	StructPropertyHandle->EnumerateConstRawData([&NumStale](const void* RawData, const int32 /*DataIndex*/, const int32 /*NumDatas*/) -> bool
+	StructPropertyHandle->EnumerateConstRawData([&NumStale, &ChannelVarNames](const void* RawData, const int32, const int32) -> bool
 	{
 		if (const FNDCBinder* Writer = static_cast<const FNDCBinder*>(RawData))
 		{
-			NumStale = FMath::Max(NumStale, Writer->CountStaleBindings());
+			int32 Count = 0;
+			for (const FNDCVariableBinding& Row : Writer->GetBindings())
+			{
+				Count += IsStaleAndDrawn(Row, ChannelVarNames) ? 1 : 0;
+			}
+			NumStale = FMath::Max(NumStale, Count);
 		}
 		return true;
 	});
 	if (NumStale > 0)
 	{
-		TSharedPtr<IPropertyUtilities> Utilities = PropertyUtilities;
 		PayloadGroup.AddWidgetRow()
 		.WholeRowContent()
 		[
-			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::Format(
-					LOCTEXT("StaleRowsPresentFmt", "{0} row(s) have nothing to write to in this channel."),
-					FText::AsNumber(NumStale)))
-				.Font(IDetailLayoutBuilder::GetDetailFont())
-				.ColorAndOpacity(FSlateColor(StaleRowColor))
-			]
-			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("RemoveStaleRows", "Remove"))
-				.ToolTipText(LOCTEXT("RemoveStaleRowsTooltip",
-					"Removes every row this channel has no place for, including access context rows whose field is gone (those have no row of their own here). Undoable; nothing else is touched."))
-				.OnClicked_Lambda([StructPropertyHandle, Utilities]() -> FReply
-				{
-					// A button press is its own edit, so it brings its own transaction — unlike the
-					// sync, which runs inside the property change that provoked it.
-					const FScopedTransaction Transaction(LOCTEXT("RemoveStaleRowsTransaction", "Remove Stale NDC Rows"));
-					StructPropertyHandle->NotifyPreChange();
-					StructPropertyHandle->EnumerateRawData([](void* RawData, const int32 /*DataIndex*/, const int32 /*NumDatas*/) -> bool
-					{
-						if (FNDCBinder* Writer = static_cast<FNDCBinder*>(RawData))
-						{
-							Writer->PruneStaleBindings();
-						}
-						return true;
-					});
-					StructPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayRemove);
-					if (Utilities.IsValid())
-					{
-						// The rows this just removed still have widgets; rebuild rather than leave them.
-						Utilities->RequestForceRefresh();
-					}
-					return FReply::Handled();
-				})
-			]
+			SNew(STextBlock)
+			.Text(FText::Format(
+				LOCTEXT("StaleRowsPresentFmt",
+					"{0} row(s) have no variable in this channel, which fails this asset's compile. Restore the variable, or delete the row."),
+				FText::AsNumber(NumStale)))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
+			.ColorAndOpacity(FSlateColor(StaleRowColor))
+			.AutoWrapText(true)
 		];
 	}
 
@@ -1764,7 +1747,7 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 		const FName VarName = Binding->VarName;
 		const ENDCVariableType Type = Binding->Type;
 
-		const bool bStale = !ChannelVarNames.Contains(VarName);
+		const bool bStale = IsStaleAndDrawn(*Binding, ChannelVarNames);
 		const FText TypeText = StaticEnum<ENDCVariableType>()->GetDisplayNameTextByValue((int64)Type);
 
 		FText NameToolTip = FText::Format(LOCTEXT("BindingRowTooltip", "{0} ({1})"), FText::FromName(VarName), TypeText);
@@ -1772,7 +1755,7 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 		if (bStale)
 		{
 			NameColor = FSlateColor(StaleRowColor);
-			NameToolTip = LOCTEXT("StaleRowTooltip", "This variable no longer exists in the channel. The row is kept (non-destructive) and is skipped at write time — put the variable back and it works again, or use Remove at the top of Payload to be rid of it.");
+			NameToolTip = LOCTEXT("StaleRowTooltip", "This variable no longer exists in the channel, so the row writes nothing and fails this asset's compile. It is kept because something was authored on it. Put the variable back and it works again with what it holds, or delete it with the bin at the end of the row.");
 		}
 		else if (Type == ENDCVariableType::Unsupported)
 		{
@@ -1815,9 +1798,12 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 				{
 					return IsSourceBound(SourceHandle) ? EVisibility::Collapsed : EVisibility::Visible;
 				})
-				.IsEnabled_Lambda([SourceHandle]()
+				//~ Greyed on a stale row rather than hidden: such a row can be one whose only content is
+				//~ the value shown here, and that value is why it was kept and what the author is being
+				//~ asked about. Readable, not editable — editing it would change nothing that is written.
+				.IsEnabled_Lambda([SourceHandle, bStale]()
 				{
-					return !IsSourceBound(SourceHandle);
+					return !bStale && !IsSourceBound(SourceHandle);
 				})
 				[
 					BuildValueEditor(BindingHandle, Type)
@@ -1834,8 +1820,47 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 			[
 				SNew(SBox)
 				.Visibility(Type == ENDCVariableType::Unsupported ? EVisibility::Collapsed : EVisibility::Visible)
+				.IsEnabled(!bStale)
 				[
 					BuildBindButton(StructPropertyHandle, BindingHandle, Type)
+				]
+			]
+			// The way out of a stale row, on the row itself. Nothing else here is live: a row the
+			// channel has no variable for cannot be given a value or a binding that would do anything,
+			// so the only control it keeps is the one that removes it. Present only on such a row, so
+			// an ordinary row is not invited to be deleted — the set is the channel's to decide.
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(6.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SBox)
+				.Visibility(bStale ? EVisibility::Visible : EVisibility::Collapsed)
+				[
+					PropertyCustomizationHelpers::MakeDeleteButton(
+						FSimpleDelegate::CreateLambda([StructPropertyHandle, Utilities = PropertyUtilities, VarName]()
+						{
+							// Its own edit, so its own transaction — unlike the sync, which runs inside
+							// the property change that provoked it. Removed by NAME rather than by the
+							// index this widget was built at: a sync between the two reorders the array.
+							const FScopedTransaction Transaction(LOCTEXT("RemoveStaleRowTransaction", "Remove Stale NDC Row"));
+							StructPropertyHandle->NotifyPreChange();
+							StructPropertyHandle->EnumerateRawData([VarName](void* RawData, const int32, const int32) -> bool
+							{
+								if (FNDCBinder* Writer = static_cast<FNDCBinder*>(RawData))
+								{
+									Writer->GetMutableBindingsUnchecked().RemoveAll(
+										[VarName](const FNDCVariableBinding& Row) { return Row.VarName == VarName; });
+								}
+								return true;
+							});
+							StructPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayRemove);
+							if (Utilities.IsValid())
+							{
+								Utilities->RequestForceRefresh();
+							}
+						}),
+						LOCTEXT("RemoveStaleRowTooltip", "Delete this row. It has no variable in this channel, so it writes nothing and fails the asset's compile."))
 				]
 			]
 		];

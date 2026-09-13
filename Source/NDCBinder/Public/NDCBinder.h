@@ -53,32 +53,57 @@ struct FNiagaraTypeDefinition;
 //~
 //~ All of this gates editor menus, not the runtime: a node someone already placed keeps compiling.
 //~ NDCBinder.Editor.GraphSurface pins all three cases so they stay this way.
+/**
+ * Which of UNiagaraDataChannelWriter's Write* overloads a row goes out through.
+ *
+ * Niagara states the set of writable types as a list of FUNCTIONS, not as data — WriteFloat,
+ * WriteVector, WritePosition and the rest — so there is no engine enum to use here. The nearest
+ * candidates all lose what this has to keep: ENiagaraBaseTypes is the GPU scalar layout (Half, Float,
+ * Int32, Bool), and EPropertyBagPropertyType calls eight of the entries below a plain "Struct". That
+ * distinction is load-bearing: Vector and Position are both an FVector in C++ and two different types
+ * to Niagara (FVector3f against FNiagaraPosition), so only the overload taken tells them apart.
+ *
+ * Not a second source of truth: the channel's FNiagaraTypeDefinition is, and this is converted from
+ * it on every sync and back again for the write. See VariableTypeFromNiagaraType.
+ *
+ * VALUES ARE WRITTEN OUT AND MUST NOT BE REUSED OR REORDERED. This is a UPROPERTY on every row, so
+ * the number is what sits in the asset. A reordering would retype rows in assets nobody reopens, and
+ * a row whose type no longer matches its channel variable resolves to nothing and is skipped in
+ * silence — the loudest that mistake would ever get is an effect that stopped coming out.
+ */
 UENUM()
 enum class ENDCVariableType : uint8
 {
 	Unsupported = 0,
-	Bool,
-	Int32,
-	Float,
-	Vector2D,
-	Vector,
-	Vector4,
-	Quat,
-	LinearColor,
-	Position,
-	Enum,
-	SpawnInfo,
-	ID,
+	Bool = 1,
+	Int32 = 2,
+	Float = 3,
+	Vector2D = 4,
+	Vector = 5,
+	Vector4 = 6,
+	Quat = 7,
+	LinearColor = 8,
+	Position = 9,
+	Enum = 10,
+	SpawnInfo = 11,
+	ID = 12,
 };
 
-/** Where a written value comes from. */
+/**
+ * Where a written value comes from.
+ *
+ * Values written out and not to be reused or reordered, for the reason above and one more: unlike a
+ * row's type, this one is AUTHORED rather than re-derived from the channel, so nothing would ever
+ * correct it. A row that read its value back as the wrong source would quietly write its constant
+ * where a binding was meant.
+ */
 UENUM()
 enum class ENDCValueSource : uint8
 {
 	/** The constant stored on this binding — for a context row, the value authored on the context. */
 	Constant = 0,
 	/** A function on the owning object (see FNDCBinder::IsValidValueFunction for the signature). */
-	Function,
+	Function = 1,
 	/**
 	 * A field of the event data struct, read straight out of it.
 	 *
@@ -91,7 +116,7 @@ enum class ENDCValueSource : uint8
 	 * of its properties yields the class default, which is what the constant on this row already is.
 	 * The event data is the one thing that is genuinely per write.
 	 */
-	EventData,
+	EventData = 2,
 };
 
 /**
@@ -444,6 +469,36 @@ struct NDCBINDER_API FNDCVariableBinding
 
 	UPROPERTY(EditAnywhere, Category = "NDC")
 	uint8 EnumValue = 0;
+
+	/**
+	 * True when this row writes something the author picked, rather than the constant sitting on it.
+	 *
+	 * Source alone does not answer it: a row can name a source with nothing picked yet, which is the
+	 * unfinished state the validator reports on its own terms. Both halves, or neither.
+	 */
+	bool IsBound() const;
+
+	/**
+	 * True when the constant on this row is not the one it was born with.
+	 *
+	 * Read as "what this row would put in the channel differs from what an untouched row of its type
+	 * would", which is why it compares the same field per type that the write does, and why an exact
+	 * comparison is the right one: typing the default back in leaves a row that writes what a fresh
+	 * one writes, and nothing is lost by treating it as untouched.
+	 */
+	bool HasAuthoredConstant() const;
+
+	/**
+	 * True when someone put something into this row: a binding, or a constant they changed.
+	 *
+	 * This is what decides whether a row that has lost its channel variable is kept and reported, or
+	 * dropped in silence. Asked by the sync that drops rows, by the validator that reports them and by
+	 * the panel that greys them, so that all three are answering one question.
+	 *
+	 * The panel gives every channel variable a row whether or not anyone wanted one, so most rows in
+	 * existence hold neither. Those are what this exists to let go of.
+	 */
+	bool HasAuthoredContent() const;
 
 	/**
 	 * Builds a function-sourced binding row (used for native default payloads). InEnumDef only drives
@@ -1170,8 +1225,33 @@ public:
 	bool NeedsBindingSync() const;
 	bool HasStaleBindings() const;
 
-	/** How many rows PruneStaleBindings would remove — what the panel puts in front of the author. */
+	/**
+	 * How many rows PruneStaleBindings would remove, which is what a channel SWITCH drops: every row
+	 * the new channel has no place for, bound or not, payload or context.
+	 *
+	 * Not the count the panel shows. That one is the compiler's condition — a stale row with a binding
+	 * on it — because the line it labels claims a compile failure. See IsBindingStale.
+	 */
 	int32 CountStaleBindings() const;
+
+	/**
+	 * The names of the assigned channel's variables, empty when there is no channel.
+	 *
+	 * Gathered once and handed to IsBindingStale per row, so that the rule behind a greyed row in the
+	 * panel, the error the compiler raises and the removal PruneStaleBindings performs are the same
+	 * sentence rather than three readings of it.
+	 */
+	TSet<FName> GetChannelVariableNames() const;
+
+	/**
+	 * True when the channel has no variable this row could write to.
+	 *
+	 * False for an empty name set, that being the answer to "judged against what?" — an unassigned
+	 * channel reads back no names, and without this every row would go stale the moment the channel
+	 * was cleared. The panel and the validator both ask through here so they cannot disagree about
+	 * that; the removal paths guard on the channel pointer instead, being reached only with one.
+	 */
+	static bool IsBindingStale(const FNDCVariableBinding& Row, const TSet<FName>& ChannelVariableNames);
 #endif
 
 private:

@@ -297,9 +297,39 @@ EDataValidationResult FNDCBinder::ValidateBindings(const UClass* OwnerClass, con
 		}
 	}
 
+	// Gathered once for the loop, and empty when there is no channel — which IsBindingStale reads as
+	// "nothing to judge against", and is already its own warning above.
+	const TSet<FName> ChannelVariableNames = GetChannelVariableNames();
+
 	for (const FNDCVariableBinding& Binding : Bindings)
 	{
 		const FText What = FText::Format(LOCTEXT("BindingWhatFmt", "binding '{0}'"), FText::FromName(Binding.VarName));
+
+		// An AUTHORED row the channel has no variable for is drift, not an unfinished asset: it cannot
+		// be made to work by picking something, at write time it silently does nothing, and what it
+		// holds — a getter written for that variable, a value typed into it — is someone's work. So it
+		// fails the compile, and the panel gives it a button that deletes it.
+		//
+		// Kept rather than deleted, and the error is what makes that safe: putting the variable back
+		// revives the row with everything authored on it, and until then nothing ships holding a row
+		// that writes nowhere.
+		//
+		// A row holding NOTHING is passed over in silence — not even the unfinished-row warning below,
+		// which would be advice to finish a row that is about to be deleted. It does not survive the
+		// next sync either; see BuildSyncedBindings for why the two halves have to agree. Reporting it
+		// would mean that removing one variable fails the compile of every asset on the channel,
+		// nearly all of which never said anything about it. That error names a row its author never
+		// wrote and cannot be expected to care about, and there is no state behind it to lose.
+		if (FNDCBinder::IsBindingStale(Binding, ChannelVariableNames))
+		{
+			if (Binding.HasAuthoredContent())
+			{
+				Error(What, LOCTEXT("VariableGone",
+					"this channel has no variable of that name — the row was authored against a different channel, or the variable has been removed"),
+					SkipsValue);
+			}
+			continue;
+		}
 
 		// A channel stores an enum as an int, but every path that fills one carries a byte: Niagara's
 		// own WriteEnum takes a uint8, this row's constant is one, and the return reader narrows to

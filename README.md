@@ -140,9 +140,9 @@ nothing. Five things notice:
 | Validate Assets, the commandlet | fails the asset, so a build stops |
 | the write | skips the row and logs once per owner class and row |
 
-Stale rows are kept rather than removed, so putting a variable back revives its row. **Remove**, at
-the top of *Payload*, clears out rows the channel has no place for. It appears only when there is
-something to remove, and it is undoable.
+A row that lost its variable is kept if it holds a binding or a typed value: inert, and failing the
+asset's compile until the variable comes back or the bin at the end of the row deletes it. A row
+holding neither is dropped silently.
 
 ## Benchmark
 

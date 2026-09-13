@@ -716,6 +716,46 @@ FNDCContextBinding FNDCContextBinding::MakeFromEventData(FName InFieldName, FNam
 	return Binding;
 }
 
+bool FNDCVariableBinding::IsBound() const
+{
+	// Which of the two names is live is the source's to say, and the panel keeps them apart so a row
+	// switched from a function to a field and back does not forget either. Read the same way here.
+	switch (Source)
+	{
+	case ENDCValueSource::Function:  return !BoundFunction.IsNone();
+	case ENDCValueSource::EventData: return !BoundEventDataField.IsNone();
+	default:                         return false;
+	}
+}
+
+bool FNDCVariableBinding::HasAuthoredConstant() const
+{
+	// Field for field with the switch in WriteBinding, and deliberately so: the question is whether
+	// this row would put something different in the channel than an untouched one, so reading a field
+	// the write does not read would be answering about nothing. SpawnInfo and ID have no constant
+	// editor — an unbound row of either writes nothing at all — so neither can hold anything authored.
+	const FNDCVariableBinding Fresh;
+	switch (Type)
+	{
+	case ENDCVariableType::Bool:        return BoolValue != Fresh.BoolValue;
+	case ENDCVariableType::Int32:       return IntValue != Fresh.IntValue;
+	case ENDCVariableType::Float:       return FloatValue != Fresh.FloatValue;
+	case ENDCVariableType::Vector2D:    return Vector2DValue != Fresh.Vector2DValue;
+	case ENDCVariableType::Vector:      return VectorValue != Fresh.VectorValue;
+	case ENDCVariableType::Vector4:     return Vector4Value != Fresh.Vector4Value;
+	case ENDCVariableType::Quat:        return QuatValue != Fresh.QuatValue;
+	case ENDCVariableType::LinearColor: return ColorValue != Fresh.ColorValue;
+	case ENDCVariableType::Position:    return VectorValue != Fresh.VectorValue;
+	case ENDCVariableType::Enum:        return EnumValue != Fresh.EnumValue;
+	default:                            return false;
+	}
+}
+
+bool FNDCVariableBinding::HasAuthoredContent() const
+{
+	return IsBound() || HasAuthoredConstant();
+}
+
 FNDCVariableBinding FNDCVariableBinding::MakeFunctionBinding(FName InVarName, ENDCVariableType InType, FName InFunction, UEnum* InEnumDef)
 {
 	FNDCVariableBinding Binding;
@@ -2057,16 +2097,28 @@ namespace NDCBinderPrivate
 	 * pairing was understood — or against a channel whose context has since changed — picks up the
 	 * right flag instead of silently keeping a stale one.
 	 *
+	 * A row the context type has no field for is REMOVED here, which is the one place the writer
+	 * deletes a row without being asked. A payload row in that state is kept, because it has a row in
+	 * the panel: it can be seen, explained and deleted on purpose. A context row has none — the panel
+	 * draws a row per context FIELD and finds the binding for it, so a binding whose field is gone is
+	 * invisible. Keeping it would leave an author with a compile error they cannot see the cause of
+	 * and cannot clear. Nothing is lost that was reachable.
+	 *
+	 * The null guard above is load-bearing: with no channel there is no context type, and every row
+	 * would look stale.
+	 *
 	 * Returns true when anything changed.
 	 */
-	static bool SyncContextBindingFlags(const UScriptStruct* ContextType, TArray<FNDCContextBinding>& Rows)
+	static bool SyncContextRows(const UScriptStruct* ContextType, TArray<FNDCContextBinding>& Rows)
 	{
 		if (!ContextType)
 		{
 			return false;
 		}
 
-		bool bChanged = false;
+		bool bChanged = Rows.RemoveAll([ContextType](const FNDCContextBinding& Row)
+			{ return IsStaleContextRow(Row, ContextType); }) > 0;
+
 		for (FNDCContextBinding& Row : Rows)
 		{
 			const FProperty* Field = ContextType->FindPropertyByName(Row.FieldName);
@@ -2113,12 +2165,28 @@ namespace NDCBinderPrivate
 			Row.EnumDef = Row.Type == ENDCVariableType::Enum ? Var.GetType().GetEnum() : nullptr;
 		}
 
-		// Rows for variables the channel no longer has keep their data at the end (never destructive).
+		// Rows for variables the channel no longer has survive here, at the end, if anyone put anything
+		// into them — a binding, or a constant they changed. A row holding neither is dropped.
+		//
+		// The panel gives every channel variable a row whether the author wants one or not, so every
+		// asset on a channel holds a row per variable, most of them untouched. Keeping all of those
+		// when a variable is removed would put a stale row — and the compile error that comes with it,
+		// see ValidateBindings — into every asset on that channel, including the ones that never
+		// mentioned the variable. The cost of removing a variable would then scale with how popular
+		// the channel is rather than with who used the thing removed, which is a toll on editing the
+		// channel at all.
+		//
+		// A row someone authored is the opposite case: a getter written for that variable, a field
+		// pointed at, a number typed in. That is work, it cannot be guessed back, and an author who
+		// renames a channel variable would otherwise find the value they chose gone from every asset
+		// with no sign it had ever been there.
+		//
+		// The paths that reach this all hold a channel, so a cleared channel never gets here.
 		for (const FNDCVariableBinding& Binding : Bindings)
 		{
 			bool bAlreadySeen = false;
 			SeenNames.Add(Binding.VarName, &bAlreadySeen);
-			if (!bAlreadySeen)
+			if (!bAlreadySeen && Binding.HasAuthoredContent())
 			{
 				OutSynced.Add(Binding);
 			}
@@ -2162,7 +2230,7 @@ bool FNDCBinder::SyncBindingsWithChannel()
 	}
 
 
-	bChanged |= NDCBinderPrivate::SyncContextBindingFlags(ContextType.Get(), ContextBindings);
+	bChanged |= NDCBinderPrivate::SyncContextRows(ContextType.Get(), ContextBindings);
 
 	TArray<FNDCVariableBinding> Synced;
 	if (NDCBinderPrivate::BuildSyncedBindings(Channel, Bindings, Synced))
@@ -2188,7 +2256,7 @@ bool FNDCBinder::NeedsBindingSync() const
 	// Asked of a copy rather than reimplemented as a read-only test: a dry run that answers by a
 	// different route than the run it predicts is how the two stop agreeing.
 	TArray<FNDCContextBinding> ContextRows = ContextBindings;
-	if (NDCBinderPrivate::SyncContextBindingFlags(Channel->GetAccessContextType().Get(), ContextRows))
+	if (NDCBinderPrivate::SyncContextRows(Channel->GetAccessContextType().Get(), ContextRows))
 	{
 		return true;
 	}
@@ -2224,6 +2292,18 @@ bool FNDCBinder::HasStaleBindings() const
 	// Asked of the count rather than answered again: rows are few, and a second reading of the rule
 	// is what the shared predicates exist to stop.
 	return CountStaleBindings() > 0;
+}
+
+TSet<FName> FNDCBinder::GetChannelVariableNames() const
+{
+	const UNiagaraDataChannel* Channel = GetChannel();
+	return Channel ? NDCBinderPrivate::GatherChannelVarNames(Channel) : TSet<FName>();
+}
+
+bool FNDCBinder::IsBindingStale(const FNDCVariableBinding& Row, const TSet<FName>& ChannelVariableNames)
+{
+	// The gate the header explains: no names is no channel, and nothing is stale against nothing.
+	return !ChannelVariableNames.IsEmpty() && NDCBinderPrivate::IsStaleVariableRow(Row, ChannelVariableNames);
 }
 
 int32 FNDCBinder::CountStaleBindings() const

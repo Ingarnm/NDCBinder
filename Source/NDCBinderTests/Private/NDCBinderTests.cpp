@@ -117,14 +117,14 @@ bool FNDCBinderChannelSyncTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a bound row keeps its binding across a sync"), FindRow(Writer, TEXT("Size"))->BoundEventDataField, FName(TEXT("Size")));
 	TestEqual(TEXT("a constant row keeps its value across a sync"), FindRow(Writer, TEXT("Position"))->VectorValue, FVector(1.0, 2.0, 3.0));
 
-	// A variable removed from the SAME channel keeps its row: the writer is never destructive, and a
-	// row that no longer has a variable is reported stale and skipped rather than deleted.
+	// A variable removed from the SAME channel keeps its row when something is bound to it — the Size
+	// row above is — and that row is reported stale and skipped rather than deleted.
 	Writer.DataChannel = MakeChannelAsset({ { TEXT("Position"), VecType } });
 	Writer.SyncBindingsWithChannel();
-	TestEqual(TEXT("a row for a departed variable is kept"), Writer.GetBindings().Num(), 2);
+	TestEqual(TEXT("a bound row for a departed variable is kept"), Writer.GetBindings().Num(), 2);
 	TestTrue(TEXT("the departed row is reported stale"), Writer.HasStaleBindings());
-	// The number the panel puts on its Remove button has to be the number that button removes, or it
-	// offers to do one thing and does another.
+	// The number the panel puts in front of the author has to be the number a removal removes, or it
+	// says one thing and does another.
 	const int32 NumStale = Writer.CountStaleBindings();
 	const int32 NumBefore = Writer.GetBindings().Num();
 	TestEqual(TEXT("and counted"), NumStale, 1);
@@ -133,6 +133,78 @@ bool FNDCBinderChannelSyncTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("and only it"), Writer.GetBindings().Num(), 1);
 	TestFalse(TEXT("nothing is stale afterwards"), Writer.HasStaleBindings());
 	TestEqual(TEXT("and none are counted"), Writer.CountStaleBindings(), 0);
+
+	// The other half of the same rule, and the half that decides what editing a channel costs. The
+	// panel gives every channel variable a row whether or not the author wants one, so nearly every
+	// row in existence is a constant nobody typed. Those do not outlive their variable: keeping them
+	// would put a stale row, and the compile error that comes with it, into every asset on the
+	// channel — including all the ones that never mentioned the variable removed. A row someone did
+	// put something into is kept, whether that something is a binding or a value.
+	{
+		FNDCBinder Mixed = MakeWriter(FNDCBinderTestContext::StaticStruct());
+		Mixed.DataChannel = MakeChannelAsset({
+			{ TEXT("Position"), VecType }, { TEXT("Size"), FloatType },
+			{ TEXT("Alpha"), FloatType }, { TEXT("Spare"), FloatType } });
+		Mixed.SyncBindingsWithChannel();
+
+		FNDCVariableBinding& Bound = Mixed.GetMutableBindingsUnchecked()[0];
+		Bound.Source = ENDCValueSource::EventData;
+		Bound.BoundEventDataField = TEXT("Location");
+
+		Mixed.GetMutableBindingsUnchecked()[1].FloatValue = 7.0;                   // a value someone typed
+		Mixed.GetMutableBindingsUnchecked()[2].Source = ENDCValueSource::Function;  // a source, nothing picked
+		//~ [3] is left exactly as the sync made it.
+
+		// Every one of the four loses its variable at once.
+		Mixed.DataChannel = MakeChannelAsset({ { TEXT("Keep"), FloatType } });
+		Mixed.SyncBindingsWithChannel();
+
+		TestNotNull(TEXT("a bound row outlives its variable"), FindRow(Mixed, TEXT("Position")));
+		TestNotNull(TEXT("so does one holding a value someone typed"), FindRow(Mixed, TEXT("Size")));
+		TestNull(TEXT("a row that names a source with nothing picked does not"), FindRow(Mixed, TEXT("Alpha")));
+		TestNull(TEXT("nor does one left as the sync made it"), FindRow(Mixed, TEXT("Spare")));
+		TestNotNull(TEXT("and the new channel's own row is there"), FindRow(Mixed, TEXT("Keep")));
+		TestEqual(TEXT("leaving exactly those three"), Mixed.GetBindings().Num(), 3);
+
+		if (const FNDCVariableBinding* Kept = FindRow(Mixed, TEXT("Size")))
+		{
+			TestEqual(TEXT("with the value it was kept for still on it"), Kept->FloatValue, 7.0);
+		}
+
+		// Typing the default back in is not authorship: such a row writes what a fresh one writes, so
+		// there is nothing on it to lose and it goes with the rest.
+		FNDCBinder Retyped = MakeWriter(FNDCBinderTestContext::StaticStruct());
+		Retyped.DataChannel = MakeChannelAsset({ { TEXT("Size"), FloatType } });
+		Retyped.SyncBindingsWithChannel();
+		Retyped.GetMutableBindingsUnchecked()[0].FloatValue = 7.0;
+		Retyped.GetMutableBindingsUnchecked()[0].FloatValue = 0.0;
+
+		Retyped.DataChannel = MakeChannelAsset({ { TEXT("Keep"), FloatType } });
+		Retyped.SyncBindingsWithChannel();
+		TestNull(TEXT("a row whose value was put back to the default is dropped"), FindRow(Retyped, TEXT("Size")));
+	}
+
+	// A CONTEXT row is the other half of stale, and it is treated the other way round: dropped by the
+	// sync, silently. The panel draws a row per context FIELD and finds the binding for it, so a
+	// binding whose field is gone has no row of its own — it cannot be seen, explained or deleted, and
+	// keeping it would only leave a compile error with nothing to click.
+	Writer.GetMutableContextBindingsUnchecked().Add(
+		FNDCContextBinding::Make(TEXT("NoSuchContextField"), TEXT("NoParams")));
+	const int32 NumContextBefore = Writer.GetContextBindings().Num();
+	Writer.SyncBindingsWithChannel();
+	TestEqual(TEXT("a context row whose field is gone is dropped by the sync"),
+		Writer.GetContextBindings().Num(), NumContextBefore - 1);
+
+	// And the guard that makes that safe: with no channel there is no context type, every row would
+	// look stale, and dropping them all would lose an author's work for unassigning a picker.
+	{
+		FNDCBinder Unassigned = MakeWriter(FNDCBinderTestContext::StaticStruct());
+		Unassigned.GetMutableContextBindingsUnchecked().Add(
+			FNDCContextBinding::Make(TEXT("Location"), TEXT("NoParams")));
+		Unassigned.SyncBindingsWithChannel();
+		TestEqual(TEXT("with no channel assigned, context rows are left alone"),
+			Unassigned.GetContextBindings().Num(), 1);
+	}
 
 	// The case that made FNDCFieldCache key on the row's type: a sync carries the existing row over
 	// and then rewrites Type from the channel, so a row can change what it means without being
@@ -1516,6 +1588,120 @@ bool FNDCBinderValidationDriftTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FNDCBinderValidationStaleRowTest,
+	"NDCBinder.Validation.StaleRow",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FNDCBinderValidationStaleRowTest::RunTest(const FString& Parameters)
+{
+	using namespace NDCBinderTestsPrivate;
+
+#if WITH_EDITOR
+	// Drift of the second kind: nothing about the row is broken, the channel moved out from under it.
+	// A binding left pointing at a variable that is gone writes nothing at all, which is worth failing
+	// a compile over — the alternative is an effect that quietly comes out wrong, with the row still
+	// sitting there looking authored.
+	const UClass* const Host = UNDCBinderTestFunctionHost::StaticClass();
+
+	FNDCBinder Writer = MakeWriter(FNDCBinderTestContext::StaticStruct());
+	Writer.DataChannel = MakeChannelAsset({
+		{ TEXT("Position"), FNiagaraTypeDefinition::GetVec3Def() },
+		{ TEXT("Size"), FNiagaraTypeDefinition::GetFloatDef() },
+	});
+	if (!Writer.GetChannel())
+	{
+		AddError(TEXT("the test channel could not be built, so nothing below is being checked"));
+		return false;
+	}
+	Writer.SyncBindingsWithChannel();
+
+	// Bound before its variable goes, because that is the whole of what is being reported here: a
+	// getter someone wrote for a variable that no longer exists.
+	Writer.GetMutableBindingsUnchecked()[1].Source = ENDCValueSource::Function;
+	Writer.GetMutableBindingsUnchecked()[1].BoundFunction = TEXT("ReturnsDouble");
+
+	// The same channel with one variable fewer. The row is kept, as it always was; what is new is
+	// that keeping it is now something the compiler says out loud.
+	Writer.DataChannel = MakeChannelAsset({ { TEXT("Position"), FNiagaraTypeDefinition::GetVec3Def() } });
+	Writer.SyncBindingsWithChannel();
+	TestEqual(TEXT("the bound row for the departed variable is still kept"), Writer.GetBindings().Num(), 2);
+
+	FDataValidationContext Context;
+	const EDataValidationResult Result = Writer.ValidateBindings(Host, TEXT("NDCBinder"), Context);
+
+	TestEqual(TEXT("a stale row fails validation"), Result, EDataValidationResult::Invalid);
+	TestEqual(TEXT("as one error"), static_cast<int32>(Context.GetNumErrors()), 1);
+	TestEqual(TEXT("and not as a warning"), static_cast<int32>(Context.GetNumWarnings()), 0);
+	if (Context.GetIssues().Num() == 1)
+	{
+		TestTrue(TEXT("the message names the row"),
+			Context.GetIssues()[0].Message.ToString().Contains(TEXT("Size")));
+	}
+
+	// The row nobody bound is the other answer, and it is silence. The sync drops such a row, but the
+	// validator is asked here without one having run — an asset can be cooked or validated without its
+	// panel ever being opened — because this is where the cost of the other answer would land: every
+	// asset on a channel carries a row per variable, nearly all untouched, so reporting these would
+	// fail the compile of assets that never said anything about the variable removed.
+	{
+		FNDCBinder Untouched = MakeWriter(FNDCBinderTestContext::StaticStruct());
+		Untouched.DataChannel = MakeChannelAsset({ { TEXT("Position"), FNiagaraTypeDefinition::GetVec3Def() } });
+
+		// A row exactly as the panel would have made it: a name, a type, and the constant it was born
+		// with. This is the shape nearly every row in every asset on a channel has.
+		FNDCVariableBinding Orphan;
+		Orphan.VarName = TEXT("Size");
+		Orphan.Type = ENDCVariableType::Float;
+		Untouched.GetMutableBindingsUnchecked().Add(Orphan);
+
+		FDataValidationContext Quiet;
+		Untouched.ValidateBindings(Host, TEXT("NDCBinder"), Quiet);
+		TestEqual(TEXT("a row holding nothing is not reported when its variable goes"),
+			static_cast<int32>(Quiet.GetNumErrors()), 0);
+
+		// Naming a source without picking anything is not a binding either: that is the unfinished
+		// state, and an unfinished row for a variable that no longer exists is nothing at all.
+		Untouched.GetMutableBindingsUnchecked().Last().Source = ENDCValueSource::Function;
+
+		FDataValidationContext StillQuiet;
+		Untouched.ValidateBindings(Host, TEXT("NDCBinder"), StillQuiet);
+		TestEqual(TEXT("nor is one that names a source but picked nothing"),
+			static_cast<int32>(StillQuiet.GetNumErrors()), 0);
+		TestEqual(TEXT("and not as the unfinished-row warning either, which would be advice to finish a row that is about to be deleted"),
+			static_cast<int32>(StillQuiet.GetNumWarnings()), 0);
+
+		// Type a value into that same row and it becomes something to lose, so it is reported like any
+		// other authored one — this is what keeps a renamed channel variable from taking the values
+		// chosen for it away with it, silently.
+		Untouched.GetMutableBindingsUnchecked().Last().Source = ENDCValueSource::Constant;
+		Untouched.GetMutableBindingsUnchecked().Last().FloatValue = 7.0;
+
+		FDataValidationContext Reported;
+		Untouched.ValidateBindings(Host, TEXT("NDCBinder"), Reported);
+		TestEqual(TEXT("a row holding a value someone typed is reported"),
+			static_cast<int32>(Reported.GetNumErrors()), 1);
+		if (Reported.GetIssues().Num() == 1)
+		{
+			TestTrue(TEXT("and that message names it too"),
+				Reported.GetIssues()[0].Message.ToString().Contains(TEXT("Size")));
+		}
+	}
+
+	// A writer with no channel is unfinished, not broken: every row would look stale, and saying so
+	// would bury the one message that matters.
+	FNDCBinder Unassigned = MakeWriter(FNDCBinderTestContext::StaticStruct());
+	Unassigned.GetMutableBindingsUnchecked().Add(
+		FNDCVariableBinding::MakeFunctionBinding(TEXT("Orphan"), ENDCVariableType::Vector, TEXT("NoParams")));
+
+	FDataValidationContext NoChannel;
+	Unassigned.ValidateBindings(Host, TEXT("NDCBinder"), NoChannel);
+	TestEqual(TEXT("with no channel assigned, no row is called stale"),
+		static_cast<int32>(NoChannel.GetNumErrors()), 0);
+#endif
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FNDCBinderValidationWideEnumTest,
