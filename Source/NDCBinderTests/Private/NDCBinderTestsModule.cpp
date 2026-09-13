@@ -13,10 +13,10 @@
  * Two things on startup, and neither of them is a test.
  *
  * The benchmark, when the command line asks for it, because that is the one thing that cannot go
- * through the automation framework: a Shipping build has no automation framework, no console and — on
+ * through the automation framework: a packaged game has no automation framework, no console and — on
  * an installed engine — no logging, so a command-line switch writing to a file is the only channel
- * that works in every configuration, and therefore the only one whose numbers can be compared between
- * them.
+ * left. It reaches as far as this module does, which is Development and DebugGame; see
+ * NDCBinderBenchmark.h for what measuring Shipping would take.
  *
  * And a hook that empties the writer's warned-once record before every test. A misconfigured row warns
  * once per owner class and binding for the life of the process, which is right for a game and wrong

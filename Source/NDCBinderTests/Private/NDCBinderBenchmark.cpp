@@ -556,7 +556,8 @@ TArray<FString> NDCBinderBenchmark::Run(UWorld* World)
 	//~ cache hit, under WITH_EDITOR — a deliberate development-only net over the caching. It is on the
 	//~ function-row path measured above, so a Shipping build's row is cheaper by roughly this much.
 	//~ ProcessEvent also drops its script call-stack tracking there (DO_BLUEPRINT_GUARD), which this
-	//~ cannot isolate — running the whole benchmark in a Shipping build is what settles that.
+	//~ cannot isolate. Settling that means a Shipping run, which needs the module retyped to Runtime
+	//~ first; see NDCBinderBenchmark.h.
 	const UClass* HostClass = Host->GetClass();
 	const FName BoundFuncName(TEXT("PerfGetVector"));
 	const double FindFunctionNs = TimeNs(Iterations, [&]()
@@ -794,8 +795,8 @@ void NDCBinderBenchmark::RunIfRequestedOnCommandLine()
 	// Deferred to the first ticking game world, because that is the earliest moment the real-write
 	// cases can run at all: they need a world, its Niagara manager and a channel handler, and module
 	// startup has none of the three. Every other case is indifferent to when it runs, so waiting
-	// costs nothing and is what lets a Shipping build produce the whole report — which is the only
-	// reason this hook exists rather than an automation test.
+	// costs nothing and is what lets a packaged game produce the whole report rather than the subset
+	// that needs no world — which is the only reason this hook exists rather than an automation test.
 	static FDelegateHandle TickHandle;
 	static bool bRan = false;
 	TickHandle = FWorldDelegates::OnWorldTickStart.AddLambda(

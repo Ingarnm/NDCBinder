@@ -6,15 +6,19 @@
 /**
  * What the writer costs over writing the same thing by hand, as a list of report lines.
  *
- * Deliberately not an automation test and deliberately not behind WITH_DEV_AUTOMATION_TESTS. The
- * question it answers is "what does this cost in Shipping", and a Shipping build has no automation
- * framework, no console to type a command into and, on an installed engine, no logging either —
- * every one of those is a global define that a project cannot change without a unique build
- * environment, which an installed engine forbids.
+ * Deliberately not an automation test and deliberately not behind WITH_DEV_AUTOMATION_TESTS, so that
+ * a build with no automation framework — and, on an installed engine, no logging to report through
+ * either — can still produce the numbers. Both of those are global defines a project cannot change
+ * without a unique build environment, which an installed engine forbids.
  *
  * So it is a plain function with two callers: the automation test, which reports the lines through
- * AddInfo, and a command-line hook that writes them to a file. The second works in any configuration,
- * which is the only way the numbers from different configurations can be compared at all.
+ * AddInfo, and a command-line hook that writes them to a file. The file is what lets the report come
+ * out of a packaged game rather than only out of the editor.
+ *
+ * HOW FAR THAT REACHES. The module this lives in is a DeveloperTool one, which UBT leaves out of
+ * Shipping entirely, so the switch reaches Development and DebugGame and no further. Measuring a
+ * Shipping build means temporarily retyping the module to Runtime in the .uplugin and rebuilding —
+ * worth knowing before reading "what does this cost shipped" into a number from here.
  */
 class UWorld;
 
@@ -30,10 +34,14 @@ namespace NDCBinderBenchmark
 	TArray<FString> Run(UWorld* World = nullptr);
 
 	/**
-	 * Runs it when the command line asks, and writes the report to the file it names:
-	 *   LyraGame.exe ... -ndcbench="C:/path/to/report.txt"
-	 * Does nothing otherwise. Called from the module's startup, and waits from there for the first
-	 * ticking game world so the real-write cases have one.
+	 * Runs it when the command line asks, and writes the report to the file it names. This is the
+	 * whole invocation, and the only place it is written down:
+	 *
+	 *   YourGame.exe YourProject.uproject -ndcbench="C:/path/to/report.txt" -unattended -nullrhi
+	 *
+	 * -unattended keeps it from stopping on a dialog and -nullrhi from opening a window, neither of
+	 * which the report needs. Does nothing without the switch. Called from the module's startup, and
+	 * waits from there for the first ticking game world so the real-write cases have one.
 	 */
 	void RunIfRequestedOnCommandLine();
 }

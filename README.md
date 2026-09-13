@@ -150,12 +150,8 @@ A benchmark ships with the plugin, so its costs do not have to be taken on trust
 row against the same work written by hand, a whole write against the parts it is made of, and one
 write of several elements against the same elements written one at a time.
 
-In the editor it runs as `NDCBinder.Performance.BindingOverhead`. From the command line it runs in any
-configuration, Shipping included, where the automation framework does not exist:
-
-```
-<YourGame>.exe <YourProject>.uproject -ndcbench="C:/path/report.txt" -unattended -nullrhi
-```
+It runs in the editor as `NDCBinder.Performance.BindingOverhead`, and from a packaged game's command
+line. See `NDCBinderBenchmark.h`.
 
 ## Modules
 
