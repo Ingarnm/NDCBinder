@@ -39,6 +39,11 @@ namespace NDCBinderCustomizationPrivate
 		FName Name;
 
 		bool IsBound() const { return Source != ENDCValueSource::Constant && !Name.IsNone(); }
+
+		//~ Both halves, for the same reason they travel together: two rows reading the same name from
+		//~ different sources are not bound to the same thing.
+		bool operator==(const FBoundTo& Other) const { return Source == Other.Source && Name == Other.Name; }
+		bool operator!=(const FBoundTo& Other) const { return !(*this == Other); }
 		bool IsFunction() const { return Source == ENDCValueSource::Function && !Name.IsNone(); }
 		bool IsEventData() const { return Source == ENDCValueSource::EventData && !Name.IsNone(); }
 	};
@@ -61,7 +66,23 @@ namespace NDCBinderCustomizationPrivate
 	 * EnumDef are the channel's and must never arrive from a clipboard — and a context menu is not
 	 * something a test can press.
 	 */
+	/**
+	 * The clipboard text for a whole row — the other half of MakePastedRowText, and the reason both
+	 * are here: the two have to be each other's inverse, and for a while they were not.
+	 */
+	FString MakeCopiedRowText(const FNDCVariableBinding& Row);
+
 	bool MakePastedRowText(const FString& Clipboard, FName VarName, ENDCVariableType Type, UEnum* EnumDef, FString& OutText);
+
+	/**
+	 * A binding on its own, as clipboard text, and back.
+	 *
+	 * Written in the SAME format a whole row copies as, so the plugin has one clipboard shape and not
+	 * two that look alike — which also means a row copied anywhere can be pasted onto a context row
+	 * that has nothing but a binding to receive.
+	 */
+	FString MakeBindingText(FBoundTo Bound);
+	FBoundTo ParseBindingText(const FString& Text);
 
 	/** How many functions on the class would bind if an Event Data Type were declared. */
 	int32 CountFunctionsNeedingEventDataType(

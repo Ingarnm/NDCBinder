@@ -515,10 +515,9 @@ namespace NDCBinderCustomizationPrivate
 	{
 		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([BindingHandle]()
 		{
-			FString Value;
-			if (BindingHandle->GetValueAsFormattedString(Value) == FPropertyAccess::Success)
+			if (const FNDCVariableBinding* Data = GetBindingData(BindingHandle))
 			{
-				FPlatformApplicationMisc::ClipboardCopy(*Value);
+				FPlatformApplicationMisc::ClipboardCopy(*MakeCopiedRowText(*Data));
 			}
 		})));
 
@@ -538,11 +537,132 @@ namespace NDCBinderCustomizationPrivate
 	}
 
 	/**
+	 * The clipboard text for a row.
+	 *
+	 * Exported from the row itself rather than through IPropertyHandle::GetValueAsFormattedString,
+	 * which looks like the obvious way and is a trap: its PortFlags default to PPF_PropertyWindow, and
+	 * under that flag an enum is written as its DISPLAY name. ENDCValueSource::EventData went out as
+	 * "Event Data", with the space, and no such enumerator exists on the way back — so the import left
+	 * Source at its default and the row arrived unbound, with the field it had named still sitting on
+	 * it and nothing anywhere marked wrong. Function survived only because its display name happens to
+	 * have no space in it, which is what made the two look like different features.
+	 *
+	 * So the copy exports exactly what the paste imports, by the same call with the same flags. Two
+	 * halves of one format, and neither borrows a default from anywhere else.
+	 *
+	 * Returns by value, because ExportText APPENDS to the string it is handed.
+	 */
+	FString MakeCopiedRowText(const FNDCVariableBinding& Row)
+	{
+		FString Text;
+		FNDCVariableBinding::StaticStruct()->ExportText(Text, &Row, nullptr, nullptr, PPF_None, nullptr);
+		return Text;
+	}
+
+	/** A binding as clipboard text: a row with nothing on it but what it is bound to. */
+	FString MakeBindingText(FBoundTo Bound)
+	{
+		FNDCVariableBinding Carrier;
+		Carrier.Source = Bound.Source;
+		if (Bound.Source == ENDCValueSource::Function)
+		{
+			Carrier.BoundFunction = Bound.Name;
+		}
+		else if (Bound.Source == ENDCValueSource::EventData)
+		{
+			Carrier.BoundEventDataField = Bound.Name;
+		}
+		return MakeCopiedRowText(Carrier);
+	}
+
+	/**
+	 * The binding that text holds, or an unbound one when it holds none.
+	 *
+	 * No separate guard against text that is not ours: anything the import does not recognise leaves
+	 * Source at Constant, which is already the answer "there is no binding here". A row that was
+	 * holding a constant answers the same way, and truthfully — its names are kept so switching it
+	 * back does not lose them, but nothing is bound.
+	 */
+	FBoundTo ParseBindingText(const FString& Text)
+	{
+		if (Text.IsEmpty())
+		{
+			return FBoundTo{};
+		}
+
+		FOutputDeviceNull Discard;
+		FNDCVariableBinding Carrier;
+		if (!FNDCVariableBinding::StaticStruct()->ImportText(*Text, &Carrier, nullptr, PPF_None, &Discard, FNDCVariableBinding::StaticStruct()->GetName()))
+		{
+			return FBoundTo{};
+		}
+
+		switch (Carrier.Source)
+		{
+		case ENDCValueSource::Function:  return FBoundTo{ Carrier.Source, Carrier.BoundFunction };
+		case ENDCValueSource::EventData: return FBoundTo{ Carrier.Source, Carrier.BoundEventDataField };
+		default:                         return FBoundTo{};
+		}
+	}
+
+	/**
+	 * Copy and Paste of the binding on a context row the panel draws itself.
+	 *
+	 * Only those rows. A context field with a value of its own gets a real property row, and that
+	 * row's menu is the engine's, carrying the value as plain text that pastes into any property of
+	 * that type anywhere in the editor — not ours to spend. A Transient field has no value to author
+	 * and so no property row at all, which left it with a greyed menu and nothing behind it: on that
+	 * row the binding is the only thing there is.
+	 *
+	 * Paste does not ask whether the binding fits, for the same reason the payload row's does not: a
+	 * binding that no longer returns the right thing is what the validator reports and the panel marks
+	 * red, and a second, quieter opinion here would only disagree with it.
+	 */
+	static void BindBindingCopyPaste(FDetailWidgetRow& Row, TFunction<FBoundTo()> GetCurrent, TFunction<void(FBoundTo)> OnPick)
+	{
+		Row.CopyAction(FUIAction(
+			FExecuteAction::CreateLambda([GetCurrent]()
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*MakeBindingText(GetCurrent()));
+			}),
+			FCanExecuteAction::CreateLambda([GetCurrent]() { return GetCurrent().IsBound(); })));
+
+		//~ The clipboard is read in CanExecute, as the engine's own CanPasteProperty does, so the entry
+		//~ is live exactly when there is a binding to paste.
+		Row.PasteAction(FUIAction(
+			FExecuteAction::CreateLambda([OnPick]()
+			{
+				FString Clipboard;
+				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
+				if (const FBoundTo Incoming = ParseBindingText(Clipboard); Incoming.IsBound())
+				{
+					OnPick(Incoming);
+				}
+			}),
+			FCanExecuteAction::CreateLambda([]()
+			{
+				FString Clipboard;
+				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
+				return ParseBindingText(Clipboard).IsBound();
+			})));
+	}
+
+	/**
 	 * The row that a paste should write, or false when the clipboard is not one.
 	 *
 	 * Parsed into a row of our own first, because the clipboard holds whatever was last copied
 	 * anywhere on the machine: text that is not a binding has to leave the target alone rather than
-	 * half-written, and ImportText answering null is how that is known.
+	 * half-written.
+	 *
+	 * ImportText answering null is NOT how that is known, which cost a release to find out. It answers
+	 * null only for malformed parentheses — any well-formed (...) is accepted, and names it does not
+	 * recognise are skipped in silence. So a vector copied from an access context row, (X=..,Y=..,Z=..),
+	 * parsed as a perfectly good row in which nothing at all was set, and pasting it wiped the target
+	 * down to its identity. The text has to be shown to have said something to THIS struct, which is
+	 * what comparing against a row nobody touched asks.
+	 *
+	 * The cost of that rule is pasting a genuinely blank row, which is refused along with the noise.
+	 * Nothing is lost: a row is cleared by clearing it, not by pasting emptiness onto it.
 	 *
 	 * The repair is the point. VarName, Type and EnumDef are the CHANNEL's, synced onto the row and
 	 * never authored, so a paste that carried them would rename one row to another — leaving the array
@@ -573,10 +693,21 @@ namespace NDCBinderCustomizationPrivate
 			return false;
 		}
 
+		const FNDCVariableBinding Untouched;
+		if (FNDCVariableBinding::StaticStruct()->CompareScriptStruct(&Incoming, &Untouched, PPF_None))
+		{
+			return false;
+		}
+
 		Incoming.VarName = VarName;
 		Incoming.Type = Type;
 		Incoming.EnumDef = EnumDef;
 
+		// Reset, not assigned: ExportText APPENDS to the string it is handed and never clears it. The
+		// panel passes a fresh local so it never noticed, which is exactly the kind of contract that
+		// waits for a second caller — the test that reused one string for two pastes got the first
+		// row back out of the second.
+		OutText.Reset();
 		FNDCVariableBinding::StaticStruct()->ExportText(OutText, &Incoming, nullptr, nullptr, PPF_None, nullptr);
 		return true;
 	}
@@ -2281,12 +2412,17 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 				LOCTEXT("ContextGateClearTooltipFmt", "{0} is bound, but the checkbox next to its name is clear, so the context ignores this field and the binding has no effect. Tick it to use the bound value."),
 				Field.GetDisplayNameText()));
 
+		//~ Named rather than written into the call below, because the row's own Paste sets a binding the
+		//~ same way the menu does and must not do it by a second route.
+		const TFunction<void(FBoundTo)> OnPickBinding =
+			[Rows, ContextType, FieldPtr](FBoundTo Bound) { SetContextRowBinding(Rows, ContextType, FieldPtr, Bound); };
+
 		TSharedRef<SWidget> BindButton = MakeBindButton(
 			StructPropertyHandle,
 			[FieldPtr](const FNDCBinder& W, const UFunction* Func) { return AcceptsForField(W, Func, FieldPtr); },
 			[FieldPtr](const FNDCBinder&, const FProperty* Source) { return AcceptsEventDataForField(Source, FieldPtr); },
 			GetCurrent,
-			[Rows, ContextType, FieldPtr](FBoundTo Bound) { SetContextRowBinding(Rows, ContextType, FieldPtr, Bound); },
+			OnPickBinding,
 			[Rows, FieldName]() { ClearContextRow(Rows, FieldName); },
 			UnboundTooltip,
 			FString::Printf(TEXT("Get%s"), *Field.GetName()),
@@ -2302,7 +2438,13 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 		{
 			// No property row for this field. Nothing is lost that could have been authored — the row
 			// still binds — so say where the value comes from instead of leaving an empty cell.
-			ContextGroup.AddWidgetRow()
+			//
+			// And because there is no property row, nothing gives this one a context menu either: its
+			// Copy and Paste were greyed with nothing behind them. The binding is all this row has, so
+			// the binding is what they carry.
+			FDetailWidgetRow& TransientRow = ContextGroup.AddWidgetRow();
+			BindBindingCopyPaste(TransientRow, GetCurrent, OnPickBinding);
+			TransientRow
 			.FilterString(Field.GetDisplayNameText())
 			.NameContent()
 			[

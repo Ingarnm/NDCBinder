@@ -460,8 +460,11 @@ bool FNDCBinderRowPasteTest::RunTest(const FString& Parameters)
 	Copied.VectorValue = FVector(1.0, 2.0, 3.0);
 	Copied.FloatValue = 7.0;
 
-	FString Clipboard;
-	FNDCVariableBinding::StaticStruct()->ExportText(Clipboard, &Copied, nullptr, nullptr, PPF_None, nullptr);
+	//~ MakeCopiedRowText, not an export written here: a test that exports its own way can only prove
+	//~ the paste side reads what the TEST writes. That is what let a copy which wrote enums as display
+	//~ names — "Event Data", with a space, from a PPF_PropertyWindow default — sit here green while
+	//~ every event data binding was silently dropped on paste in the panel.
+	const FString Clipboard = MakeCopiedRowText(Copied);
 	TestFalse(TEXT("the row exports to something"), Clipboard.IsEmpty());
 
 	// Pasted onto a row of a different name, a different type and a different enum — all three are
@@ -486,6 +489,40 @@ bool FNDCBinderRowPasteTest::RunTest(const FString& Parameters)
 		Pasted.VectorValue, FVector(1.0, 2.0, 3.0));
 	TestEqual(TEXT("including the one the target's type will read"), Pasted.FloatValue, 7.0);
 
+	// The OTHER source, which the case above does not cover however many names it carries: a row whose
+	// value comes from an event data field rather than a function. Both names travel either way, so
+	// only the source says which of them is live — and a source that did not survive would leave the
+	// row looking unbound with its binding still written on it.
+	FNDCVariableBinding FromField;
+	FromField.VarName = TEXT("ImpactPosition");
+	FromField.Type = ENDCVariableType::Position;
+	FromField.Source = ENDCValueSource::EventData;
+	FromField.BoundEventDataField = TEXT("Location");
+
+	FString FieldClipboard = MakeCopiedRowText(FromField);
+
+	FString PastedFieldText;
+	TestTrue(TEXT("a row bound to an event data field is accepted"),
+		MakePastedRowText(FieldClipboard, TEXT("ImpactNormal"), ENDCVariableType::Vector, nullptr, PastedFieldText));
+
+	FNDCVariableBinding PastedField;
+	FNDCVariableBinding::StaticStruct()->ImportText(*PastedFieldText, &PastedField, nullptr, PPF_None, GLog, FNDCVariableBinding::StaticStruct()->GetName());
+
+	TestEqual(TEXT("and arrives still reading the event data"), PastedField.Source, ENDCValueSource::EventData);
+	TestEqual(TEXT("from the field it named"), PastedField.BoundEventDataField, FName(TEXT("Location")));
+
+	// A path, which is what a nested binding stores and what a plain name would not catch: the dot
+	// survives the export and comes back as one name rather than two.
+	FromField.BoundEventDataField = TEXT("EffectContext.Origin");
+	FieldClipboard = MakeCopiedRowText(FromField);
+	if (TestTrue(TEXT("a nested binding is accepted too"),
+		MakePastedRowText(FieldClipboard, TEXT("ImpactNormal"), ENDCVariableType::Vector, nullptr, PastedFieldText)))
+	{
+		FNDCVariableBinding PastedPath;
+		FNDCVariableBinding::StaticStruct()->ImportText(*PastedFieldText, &PastedPath, nullptr, PPF_None, GLog, FNDCVariableBinding::StaticStruct()->GetName());
+		TestEqual(TEXT("with its path intact"), PastedPath.BoundEventDataField, FName(TEXT("EffectContext.Origin")));
+	}
+
 	// Anything else on the clipboard leaves the row alone. Asked of the return value because that is
 	// what stops the caller writing: a paste that half-applied would be worse than one that does
 	// nothing.
@@ -494,7 +531,50 @@ bool FNDCBinderRowPasteTest::RunTest(const FString& Parameters)
 		MakePastedRowText(TEXT("just some text"), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
 	TestFalse(TEXT("an empty clipboard is refused"),
 		MakePastedRowText(FString(), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
-	TestTrue(TEXT("and neither leaves anything behind to write"), Untouched.IsEmpty());
+
+	// The case the first version of this test missed, and it is the one that actually happens: the
+	// clipboard usually holds ANOTHER property's exported value, not prose. A struct import accepts
+	// any well-formed parentheses and skips the names it does not know, so each of these parsed as a
+	// row in which nothing was set — and pasting one wiped the target down to its name and type.
+	FVector Vector(1.0, 2.0, 3.0);
+	FString VectorText;
+	TBaseStructure<FVector>::Get()->ExportText(VectorText, &Vector, nullptr, nullptr, PPF_None, nullptr);
+	TestFalse(TEXT("a vector copied from somewhere else is not a row"),
+		MakePastedRowText(VectorText, TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
+
+	TestFalse(TEXT("nor is a struct whose fields this one has never heard of"),
+		MakePastedRowText(TEXT("(Radius=4.000000,bEnabled=True)"), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
+	TestFalse(TEXT("nor is an empty pair of parentheses"),
+		MakePastedRowText(TEXT("()"), TEXT("ImpactNormal"), ENDCVariableType::Float, TargetEnum, Untouched));
+
+	TestTrue(TEXT("and none of them leaves anything behind to write"), Untouched.IsEmpty());
+
+	// A binding on its own, which is what a context row with no value of its own copies. Same format
+	// as a whole row, so the two cross: a row copied anywhere can be pasted onto such a context row,
+	// and only the binding is taken.
+	const FBoundTo FunctionBinding{ ENDCValueSource::Function, TEXT("GetMuzzlePosition") };
+	TestTrue(TEXT("a function binding survives the clipboard"),
+		ParseBindingText(MakeBindingText(FunctionBinding)) == FunctionBinding);
+
+	const FBoundTo FieldBinding{ ENDCValueSource::EventData, TEXT("Location") };
+	TestTrue(TEXT("and so does one that reads the event data"),
+		ParseBindingText(MakeBindingText(FieldBinding)) == FieldBinding);
+
+	// The half that was silently lost until the copy stopped going through a property handle: the two
+	// differ only by their source, so a source that does not survive makes them the same binding.
+	const FBoundTo SameNameOtherSource{ ENDCValueSource::EventData, TEXT("GetMuzzlePosition") };
+	TestTrue(TEXT("the source is carried, not just the name"),
+		ParseBindingText(MakeBindingText(SameNameOtherSource)) != FunctionBinding);
+
+	TestTrue(TEXT("a copied ROW is readable as the binding on it"),
+		ParseBindingText(Clipboard) == FBoundTo{ ENDCValueSource::Function, TEXT("GetMuzzlePosition") });
+
+	// And anything that is not a binding says so, with no guard of its own: whatever the import does
+	// not recognise leaves the source at Constant, which already means "nothing is bound here".
+	TestFalse(TEXT("a vector from somewhere else carries no binding"),
+		ParseBindingText(VectorText).IsBound());
+	TestFalse(TEXT("nor does prose"), ParseBindingText(TEXT("just some text")).IsBound());
+	TestFalse(TEXT("nor an empty clipboard"), ParseBindingText(FString()).IsBound());
 
 	return true;
 }
