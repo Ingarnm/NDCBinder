@@ -576,6 +576,75 @@ bool FNDCBinderRowPasteTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("nor does prose"), ParseBindingText(TEXT("just some text")).IsBound());
 	TestFalse(TEXT("nor an empty clipboard"), ParseBindingText(FString()).IsBound());
 
+	// Which member an unbound row copies as, and the reason a row exchanges values with the rest of
+	// the editor at all: the text on the clipboard is the TYPE's, not the row's.
+	TestEqual(TEXT("a position row copies the vector member"),
+		ValuePropertyNameFor(ENDCVariableType::Position), FName(TEXT("VectorValue")));
+	TestEqual(TEXT("and so does a vector row, which is why the two trade"),
+		ValuePropertyNameFor(ENDCVariableType::Vector), ValuePropertyNameFor(ENDCVariableType::Position));
+	TestEqual(TEXT("a float row copies its own"),
+		ValuePropertyNameFor(ENDCVariableType::Float), FName(TEXT("FloatValue")));
+	TestEqual(TEXT("an enum row copies the byte behind it"),
+		ValuePropertyNameFor(ENDCVariableType::Enum), FName(TEXT("EnumValue")));
+
+	// The two with no constant at all: nothing to copy as, so such a row falls back to copying itself.
+	TestEqual(TEXT("a spawn info row has no value member"),
+		ValuePropertyNameFor(ENDCVariableType::SpawnInfo), FName(NAME_None));
+	TestEqual(TEXT("nor does an id row"),
+		ValuePropertyNameFor(ENDCVariableType::ID), FName(NAME_None));
+	TestEqual(TEXT("nor a type this writer cannot write"),
+		ValuePropertyNameFor(ENDCVariableType::Unsupported), FName(NAME_None));
+
+	// Pasting a VALUE onto a bound row unbinds it. The constant on a bound row is dead data the panel
+	// does not show, so setting it and leaving the binding would be a paste that visibly did nothing.
+	FNDCVariableBinding Bound;
+	Bound.VarName = TEXT("ImpactPosition");
+	Bound.Type = ENDCVariableType::Position;
+	Bound.Source = ENDCValueSource::EventData;
+	Bound.BoundEventDataField = TEXT("Location");
+
+	const FName VectorMember = ValuePropertyNameFor(ENDCVariableType::Position);
+	FString ValuePasted;
+	if (TestTrue(TEXT("a vector is a value this row can take"),
+		MakePastedValueText(Bound, VectorMember, VectorText, ValuePasted)))
+	{
+		FNDCVariableBinding AfterValue;
+		FNDCVariableBinding::StaticStruct()->ImportText(*ValuePasted, &AfterValue, nullptr, PPF_None, GLog, FNDCVariableBinding::StaticStruct()->GetName());
+
+		TestEqual(TEXT("the value lands"), AfterValue.VectorValue, FVector(1.0, 2.0, 3.0));
+		TestEqual(TEXT("and the row is no longer bound"), AfterValue.Source, ENDCValueSource::Constant);
+		TestEqual(TEXT("with what it was bound to left written on it, one pick from coming back"),
+			AfterValue.BoundEventDataField, FName(TEXT("Location")));
+		TestEqual(TEXT("and its identity untouched"), AfterValue.VarName, FName(TEXT("ImpactPosition")));
+	}
+
+	// What must NOT unbind a row: text that says nothing to its value member. Without this a vector
+	// copied from anywhere unrelated would drop a binding and change nothing else.
+	FString NotAValue;
+	TestFalse(TEXT("a whole row is not a value"),
+		MakePastedValueText(Bound, VectorMember, Clipboard, NotAValue));
+	TestFalse(TEXT("nor is prose"),
+		MakePastedValueText(Bound, VectorMember, TEXT("just some text"), NotAValue));
+	TestFalse(TEXT("nor is an empty clipboard"),
+		MakePastedValueText(Bound, VectorMember, FString(), NotAValue));
+	TestFalse(TEXT("and a row with no constant at all takes no value"),
+		MakePastedValueText(Bound, ValuePropertyNameFor(ENDCVariableType::SpawnInfo), VectorText, NotAValue));
+	TestTrue(TEXT("none of which leaves anything to write"), NotAValue.IsEmpty());
+
+	// Every name it hands out has to BE a member, or the row copies nothing and edits nothing while
+	// looking perfectly fine — a GET_MEMBER_NAME_CHECKED away from silence.
+	for (int32 Index = 0; Index < StaticEnum<ENDCVariableType>()->NumEnums(); ++Index)
+	{
+		const ENDCVariableType Each = (ENDCVariableType)StaticEnum<ENDCVariableType>()->GetValueByIndex(Index);
+		const FName Member = ValuePropertyNameFor(Each);
+		if (!Member.IsNone())
+		{
+			TestNotNull(*FString::Printf(TEXT("the member named for %s exists on the row"),
+					*StaticEnum<ENDCVariableType>()->GetNameStringByIndex(Index)),
+				FNDCVariableBinding::StaticStruct()->FindPropertyByName(Member));
+		}
+	}
+
 	return true;
 }
 

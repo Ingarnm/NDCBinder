@@ -502,9 +502,17 @@ namespace NDCBinderCustomizationPrivate
 	 * behind them. FDetailWidgetRow::CopyAction/PasteAction is the supported hook for that, the one
 	 * FMatrixStructCustomization binds its composed rows with.
 	 *
-	 * What travels is the WHOLE row — its source, what it is bound to, and every constant on it — so a
-	 * getter moves between rows with the value it falls back to, rather than a bare number moving on
-	 * its own.
+	 * A ROW COPIES AS WHAT IT IS. An unbound row is a value, and copies as one — in its own type's
+	 * format, so it exchanges with any property of that type anywhere in the editor: another row, an
+	 * access context field, a plain vector variable on some actor. A Position and a Vector row trade
+	 * freely, being one FVector wearing two Niagara types. A BOUND row has no value worth carrying —
+	 * the panel hides its constant for exactly that reason — so it copies as the whole row, which is
+	 * how a getter moves from one row to another.
+	 *
+	 * Paste takes either. A row replaces the row; a bare value sets the constant and leaves everything
+	 * else alone, handed straight to the value property so it lands the way that property would take
+	 * it anywhere else — tolerance of nonsense included, which is the editor's behaviour everywhere and
+	 * not something to improve on here.
 	 *
 	 * BOTH actions are bound even where paste is refused, because the menu appears only when both are
 	 * (FDetailWidgetRow::IsCopyPasteBound). Paste declines through its CanExecute instead, which
@@ -513,24 +521,51 @@ namespace NDCBinderCustomizationPrivate
 	 */
 	static void BindRowCopyPaste(FDetailWidgetRow& Row, const TSharedRef<IPropertyHandle>& BindingHandle, FName VarName, ENDCVariableType Type, UEnum* EnumDef, bool bPasteAllowed)
 	{
-		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([BindingHandle]()
+		const FName ValuePropName = ValuePropertyNameFor(Type);
+
+		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([BindingHandle, ValuePropName]()
 		{
-			if (const FNDCVariableBinding* Data = GetBindingData(BindingHandle))
+			const FNDCVariableBinding* Data = GetBindingData(BindingHandle);
+			if (!Data)
 			{
-				FPlatformApplicationMisc::ClipboardCopy(*MakeCopiedRowText(*Data));
+				return;
 			}
+
+			TSharedPtr<IPropertyHandle> ValueHandle = ValuePropName.IsNone() ? nullptr : BindingHandle->GetChildHandle(ValuePropName);
+			if (FString Value; !Data->IsBound() && ValueHandle.IsValid()
+				// PPF_None, not the default: PPF_PropertyWindow writes an enum as its display name, and
+				// an enum row's constant would come back as a word no import knows. See MakeCopiedRowText.
+				&& ValueHandle->GetValueAsFormattedString(Value, PPF_None) == FPropertyAccess::Success)
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*Value);
+				return;
+			}
+
+			FPlatformApplicationMisc::ClipboardCopy(*MakeCopiedRowText(*Data));
 		})));
 
 		Row.PasteAction(FUIAction(
-			FExecuteAction::CreateLambda([BindingHandle, VarName, Type, EnumDef]()
+			FExecuteAction::CreateLambda([BindingHandle, VarName, Type, EnumDef, ValuePropName]()
 			{
 				FString Clipboard;
 				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
 
-				FString Repaired;
-				if (MakePastedRowText(Clipboard, VarName, Type, EnumDef, Repaired))
+				// A whole row first, because that answer is exact: it is refused unless the text says
+				// something to this struct, so anything it accepts really is a row.
+				if (FString Repaired; MakePastedRowText(Clipboard, VarName, Type, EnumDef, Repaired))
 				{
 					BindingHandle->SetValueFromFormattedString(Repaired);
+					return;
+				}
+
+				// Otherwise a bare value of this row's type, which also unbinds it: see
+				// MakePastedValueText for why that is the paste and not an extra.
+				if (const FNDCVariableBinding* Data = GetBindingData(BindingHandle))
+				{
+					if (FString Updated; MakePastedValueText(*Data, ValuePropName, Clipboard, Updated))
+					{
+						BindingHandle->SetValueFromFormattedString(Updated);
+					}
 				}
 			}),
 			FCanExecuteAction::CreateLambda([bPasteAllowed]() { return bPasteAllowed; })));
@@ -557,6 +592,128 @@ namespace NDCBinderCustomizationPrivate
 		FString Text;
 		FNDCVariableBinding::StaticStruct()->ExportText(Text, &Row, nullptr, nullptr, PPF_None, nullptr);
 		return Text;
+	}
+
+	/**
+	 * Which member of a row holds its constant, for the type the channel gave it. None for the two
+	 * that have no constant to hold.
+	 *
+	 * The panel's value editor is built from this, and so is what the row's Copy puts on the clipboard,
+	 * because those two have to be the same field: a row that copied one member and edited another
+	 * would be two different rows depending on which you looked at.
+	 */
+	FName ValuePropertyNameFor(ENDCVariableType Type)
+	{
+		switch (Type)
+		{
+		case ENDCVariableType::Bool:        return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, BoolValue);
+		case ENDCVariableType::Int32:       return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, IntValue);
+		case ENDCVariableType::Float:       return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, FloatValue);
+		case ENDCVariableType::Vector2D:    return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, Vector2DValue);
+		//~ One member for both, which is the whole reason a Position and a Vector row exchange values:
+		//~ they are two Niagara types and one FVector.
+		case ENDCVariableType::Vector:
+		case ENDCVariableType::Position:    return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, VectorValue);
+		case ENDCVariableType::Vector4:     return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, Vector4Value);
+		case ENDCVariableType::Quat:        return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, QuatValue);
+		case ENDCVariableType::LinearColor: return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, ColorValue);
+		case ENDCVariableType::Enum:        return GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, EnumValue);
+		//~ SpawnInfo and ID have no constant editor: an unbound row of either writes nothing at all.
+		default:                            return NAME_None;
+		}
+	}
+
+	/**
+	 * The row a pasted VALUE should write, or false when the clipboard is not one for this row.
+	 *
+	 * Pasting a value UNBINDS the row, and that is the point rather than a side effect: the constant on
+	 * a bound row is dead data the panel does not even show, so setting it and leaving the binding in
+	 * place would be a paste that visibly did nothing. A row is what it holds, and after this it holds
+	 * the value that was pasted onto it. What it USED to be bound to is left written on the row, the
+	 * same way clearing a binding by hand leaves it, so binding it back costs one pick.
+	 *
+	 * Refused when the text says nothing to this property, which is the same rule the row paste uses
+	 * and is needed for the same reason: a struct import accepts any well-formed parentheses and skips
+	 * what it does not recognise, so without this a vector copied from somewhere unrelated would unbind
+	 * a row and change nothing else. The cost is that re-pasting a value a row already holds does not
+	 * unbind it — the one case where "nothing said" and "nothing changed" cannot be told apart.
+	 *
+	 * One edit, not two: the value and the source live in the same struct, and a paste that wrote them
+	 * separately would leave a moment with the new constant and the old binding both live.
+	 *
+	 * WHAT THIS CANNOT REACH, and it is worth knowing before wondering why a paste did not unbind:
+	 * only a paste through the ROW's own menu comes here. A value can also be pasted through the value
+	 * WIDGET — Ctrl+V with the cursor in the vector box, its own right-click menu, or the X/Y/Z child
+	 * rows a context field expands into. Those belong to the property and to Slate's numeric entry,
+	 * which write the constant straight through the handle and never ask this row anything. The
+	 * binding is left standing, and the pasted value shows up the moment it is cleared by hand.
+	 *
+	 * Intercepting that would mean wrapping the copy and paste of every widget the value editor is
+	 * built from, and of every child row under it, to say one thing about a state none of them know
+	 * they are in. It is not worth what it would cost to the thing they do well, which is behave
+	 * exactly like the same property does everywhere else in the editor.
+	 */
+	bool MakePastedValueText(const FNDCVariableBinding& Current, FName ValuePropName, const FString& Clipboard, FString& OutText)
+	{
+		if (Clipboard.IsEmpty() || ValuePropName.IsNone())
+		{
+			return false;
+		}
+
+		FProperty* ValueProp = FNDCVariableBinding::StaticStruct()->FindPropertyByName(ValuePropName);
+		if (!ValueProp)
+		{
+			return false;
+		}
+
+		FOutputDeviceNull Discard;
+		FNDCVariableBinding Updated = Current;
+		if (!ValueProp->ImportText_Direct(*Clipboard, ValueProp->ContainerPtrToValuePtr<void>(&Updated), nullptr, PPF_None, &Discard))
+		{
+			return false;
+		}
+		if (ValueProp->Identical_InContainer(&Updated, &Current))
+		{
+			return false;
+		}
+
+		Updated.Source = ENDCValueSource::Constant;
+
+		OutText = MakeCopiedRowText(Updated);
+		return true;
+	}
+
+	/**
+	 * True when this text would set a different value on this property than it already holds.
+	 *
+	 * The same question MakePastedValueText answers for a payload row, asked of a property reached
+	 * through a handle instead of a struct — a context field lives inside the access context's
+	 * instanced struct, and the row does not own the container it sits in.
+	 *
+	 * It has to be answerable BEFORE anything is written. Clearing a binding and writing a value are
+	 * two edits on two different objects here, and the first of them has to be the clear: writing the
+	 * value first refreshes the panel underneath, and the handles this row captured are then answering
+	 * for a layout that has been rebuilt — which is how a paste came to set the value and leave the
+	 * binding standing, with no sign that half of it had gone missing.
+	 */
+	bool WouldChangeValue(const FProperty* Prop, const void* Current, const FString& Text)
+	{
+		if (!Prop || !Current || Text.IsEmpty())
+		{
+			return false;
+		}
+
+		void* Scratch = FMemory::Malloc(Prop->GetSize(), Prop->GetMinAlignment());
+		Prop->InitializeValue(Scratch);
+		Prop->CopyCompleteValue(Scratch, Current);
+
+		FOutputDeviceNull Discard;
+		const bool bImported = Prop->ImportText_Direct(*Text, Scratch, nullptr, PPF_None, &Discard) != nullptr;
+		const bool bChanged = bImported && !Prop->Identical(Scratch, Current);
+
+		Prop->DestroyValue(Scratch);
+		FMemory::Free(Scratch);
+		return bChanged;
 	}
 
 	/** A binding as clipboard text: a row with nothing on it but what it is bound to. */
@@ -2483,8 +2640,77 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 		PropRow->GetDefaultWidgets(NameWidget, ValueWidget, DefaultRow, /*bAddWidgetDecoration=*/ true);
 
 		FDetailWidgetRow& Row = PropRow->CustomWidget(/*bShowChildren=*/ true);
-		Row.CopyAction(DefaultRow.CopyMenuAction);
-		Row.PasteAction(DefaultRow.PasteMenuAction);
+
+		// The same rule the payload rows follow — a row copies as what it IS — reaching the context
+		// rows that have a value of their own. Unbound, this row is that value, and copies as one, in
+		// the field's own format: it still exchanges values with any property of that type anywhere in
+		// the editor. Bound, the value is not what the row means, so the BINDING travels instead, in
+		// the same clipboard format a payload row uses — which is what lets a getter move between the
+		// two halves of the panel.
+		//
+		// BOTH halves are done here rather than half of it delegated, and that is the lesson of the
+		// version before this one. This row used to say
+		//
+		//     Row.CopyAction(DefaultRow.CopyMenuAction);
+		//     Row.PasteAction(DefaultRow.PasteMenuAction);
+		//
+		// which reads like forwarding and is nothing of the sort: GetDefaultWidgets fills in widgets
+		// and edit conditions and never touches those two actions, so both were UNBOUND. They left
+		// IsCopyPasteBound false, the row fell through to the details panel's own OnCopyProperty, and
+		// the field copied like any property — because of those lines doing nothing, not because of
+		// them doing something. Binding real actions here turns that fallback off, so anything not
+		// implemented here is simply gone, as the field's values briefly were.
+		Row.CopyAction(FUIAction(FExecuteAction::CreateLambda([GetCurrent, FieldHandle]()
+		{
+			if (const FBoundTo Bound = GetCurrent(); Bound.IsBound())
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*MakeBindingText(Bound));
+				return;
+			}
+
+			//~ PPF_None for the reason MakeCopiedRowText gives: the default writes enums as display names.
+			if (FString Value; FieldHandle->GetValueAsFormattedString(Value, PPF_None) == FPropertyAccess::Success)
+			{
+				FPlatformApplicationMisc::ClipboardCopy(*Value);
+			}
+		})));
+
+		Row.PasteAction(FUIAction(
+			FExecuteAction::CreateLambda([GetCurrent, OnPickBinding, FieldHandle, FieldPtr, Rows, FieldName]()
+			{
+				FString Clipboard;
+				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
+
+				if (const FBoundTo Incoming = ParseBindingText(Clipboard); Incoming.IsBound())
+				{
+					OnPickBinding(Incoming);
+					return;
+				}
+
+				// A value, which unbinds the row for the reason MakePastedValueText gives. Both halves
+				// are decided before either is written, and the CLEAR goes first: writing the value
+				// rebuilds the panel under this row, and the handles captured here answer for the
+				// layout that was. Asking them afterwards is how a paste came to set the value and
+				// leave the binding standing.
+				void* RawData = nullptr;
+				if (FieldHandle->GetValueData(RawData) != FPropertyAccess::Success
+					|| !WouldChangeValue(FieldPtr, RawData, Clipboard))
+				{
+					return;
+				}
+
+				if (GetCurrent().IsBound())
+				{
+					ClearContextRow(Rows, FieldName);
+				}
+				FieldHandle->SetValueFromFormattedString(Clipboard);
+			}),
+			FCanExecuteAction::CreateLambda([FieldHandle]()
+			{
+				FString Clipboard;
+				FPlatformApplicationMisc::ClipboardPaste(Clipboard);
+				return !Clipboard.IsEmpty() && !FieldHandle->IsEditConst();
+			})));
 		// The name half keeps its inline gate checkbox live at all times: it is the author's switch,
 		// and a binding does not take it away from them.
 		Row.NameContent()
@@ -2588,20 +2814,8 @@ TSharedRef<SWidget> FNDCBinderCustomization::BuildValueEditor(TSharedRef<IProper
 			});
 	}
 
-	FName ValuePropName = NAME_None;
-	switch (Type)
-	{
-	case ENDCVariableType::Bool:        ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, BoolValue); break;
-	case ENDCVariableType::Int32:       ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, IntValue); break;
-	case ENDCVariableType::Float:       ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, FloatValue); break;
-	case ENDCVariableType::Vector2D:    ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, Vector2DValue); break;
-	case ENDCVariableType::Vector:
-	case ENDCVariableType::Position:    ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, VectorValue); break;
-	case ENDCVariableType::Vector4:     ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, Vector4Value); break;
-	case ENDCVariableType::Quat:        ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, QuatValue); break;
-	case ENDCVariableType::LinearColor: ValuePropName = GET_MEMBER_NAME_CHECKED(FNDCVariableBinding, ColorValue); break;
-	default: break;
-	}
+	//~ Enum is already answered above, by the combo box it needs; everything else asks the shared map.
+	const FName ValuePropName = ValuePropertyNameFor(Type);
 
 	if (ValuePropName.IsNone())
 	{

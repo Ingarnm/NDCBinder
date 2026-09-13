@@ -67,12 +67,27 @@ namespace NDCBinderCustomizationPrivate
 	 * something a test can press.
 	 */
 	/**
+	 * Which member holds a row's constant, for the type the channel gave it — none for the two types
+	 * that have no constant. The value editor and the row's Copy both ask, so a row shows and copies
+	 * the same field.
+	 */
+	FName ValuePropertyNameFor(ENDCVariableType Type);
+
+	/**
 	 * The clipboard text for a whole row — the other half of MakePastedRowText, and the reason both
 	 * are here: the two have to be each other's inverse, and for a while they were not.
 	 */
 	FString MakeCopiedRowText(const FNDCVariableBinding& Row);
 
 	bool MakePastedRowText(const FString& Clipboard, FName VarName, ENDCVariableType Type, UEnum* EnumDef, FString& OutText);
+
+	/**
+	 * The row a pasted VALUE should write, or false when the clipboard holds no value for it.
+	 *
+	 * Apart from the panel because it decides two things worth holding: that a pasted value unbinds
+	 * the row, and that text which says nothing to the row's value member is not a paste at all.
+	 */
+	bool MakePastedValueText(const FNDCVariableBinding& Current, FName ValuePropName, const FString& Clipboard, FString& OutText);
 
 	/**
 	 * A binding on its own, as clipboard text, and back.
