@@ -33,6 +33,7 @@
 #include "SourceCodeNavigation.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Styling/AppStyle.h"
+#include "Styling/StyleColors.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SComboButton.h"
@@ -53,7 +54,22 @@
 
 namespace NDCBinderCustomizationPrivate
 {
-	static const FLinearColor StaleRowColor(1.f, 0.55f, 0.15f);
+	/**
+	 * Which colour a marker gets, and the rule behind it: the colour is the VALIDATOR'S verdict, not a
+	 * judgement of the panel's own.
+	 *
+	 * FStyleColors::Error for what fails the asset's compile — a row whose channel variable is gone, a
+	 * binding that no longer resolves, an Event Data Type that no bound function takes. Red is what
+	 * the rest of the editor uses to mean "this will not build", and these do.
+	 *
+	 * FStyleColors::Warning for what ValidateBindings says nothing about and the panel is only
+	 * pointing out: a channel variable of a type no Write* overload covers, or a bound context field
+	 * whose checkbox is clear. Those ship.
+	 *
+	 * Engine tokens rather than the literal amber all of these used to share, which said "something is
+	 * off here" in one voice for two quite different weights of claim — and left an author no way to
+	 * tell, from the panel alone, which of them would stop a build.
+	 */
 
 	/** Raw read of the writer being edited (the first instance — the bind menu only needs its EventDataType). */
 	static const FNDCBinder* GetWriterData(const TSharedRef<IPropertyHandle>& StructHandle)
@@ -1396,7 +1412,7 @@ namespace NDCBinderCustomizationPrivate
 					{
 						if (GetBindingProblem() != EBindingProblem::None)
 						{
-							return FSlateColor(StaleRowColor);
+							return FStyleColors::Error;
 						}
 						FEdGraphPinType PinType;
 						return GetBoundPinType(StructHandle, GetCurrent(), PinType)
@@ -1417,7 +1433,7 @@ namespace NDCBinderCustomizationPrivate
 					})
 					.ColorAndOpacity_Lambda([GetBindingProblem]() -> FSlateColor
 					{
-						return GetBindingProblem() != EBindingProblem::None ? FSlateColor(StaleRowColor) : FSlateColor::UseForeground();
+						return GetBindingProblem() != EBindingProblem::None ? FStyleColors::Error : FSlateColor::UseForeground();
 					})
 				]
 			]
@@ -1730,7 +1746,7 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 					"{0} row(s) have no variable in this channel, which fails this asset's compile. Restore the variable, or delete the row."),
 				FText::AsNumber(NumStale)))
 			.Font(IDetailLayoutBuilder::GetDetailFont())
-			.ColorAndOpacity(FSlateColor(StaleRowColor))
+			.ColorAndOpacity(FStyleColors::Error)
 			.AutoWrapText(true)
 		];
 	}
@@ -1754,12 +1770,15 @@ void FNDCBinderCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> Stru
 		FSlateColor NameColor = FSlateColor::UseForeground();
 		if (bStale)
 		{
-			NameColor = FSlateColor(StaleRowColor);
+			NameColor = FStyleColors::Error;
 			NameToolTip = LOCTEXT("StaleRowTooltip", "This variable no longer exists in the channel, so the row writes nothing and fails this asset's compile. It is kept because something was authored on it. Put the variable back and it works again with what it holds, or delete it with the bin at the end of the row.");
 		}
 		else if (Type == ENDCVariableType::Unsupported)
 		{
-			NameColor = FSlateColor(StaleRowColor);
+			//~ Warning, not error: the validator lets this ship. The channel declares a type no Write*
+			//~ overload covers, which is the channel's business and nothing the author of this asset
+			//~ can act on beyond knowing the row goes out empty.
+			NameColor = FStyleColors::Warning;
 			NameToolTip = LOCTEXT("UnsupportedRowTooltip", "This channel variable type has no writer support — the row is skipped at write time.");
 		}
 
@@ -1997,7 +2016,9 @@ void FNDCBinderCustomization::BuildEventDataTypeWarningRow(IDetailChildrenBuilde
 		[
 			SNew(STextBlock)
 			.Font(IDetailLayoutBuilder::GetDetailFont())
-			.ColorAndOpacity(FSlateColor(StaleRowColor))
+			//~ Error: every binding this line counts is one the validator reports, each for taking a
+			//~ struct the writer does not declare.
+			.ColorAndOpacity(FStyleColors::Error)
 			.AutoWrapText(true)
 			.Text_Lambda(GetWarningText)
 		]
@@ -2164,7 +2185,8 @@ void FNDCBinderCustomization::BuildContextRows(IDetailChildrenBuilder& ChildBuil
 				return (IsBound() && !IsGateOpen()) ? EVisibility::Visible : EVisibility::Collapsed;
 			})
 			.Image(FAppStyle::GetBrush("Icons.Warning"))
-			.ColorAndOpacity(FSlateColor(StaleRowColor))
+			//~ Warning, and the icon already says so: a clear checkbox is a legal asset that ships.
+			.ColorAndOpacity(FStyleColors::Warning)
 			.ToolTipText(FText::Format(
 				LOCTEXT("ContextGateClearTooltipFmt", "{0} is bound, but the checkbox next to its name is clear, so the context ignores this field and the binding has no effect. Tick it to use the bound value."),
 				Field.GetDisplayNameText()));
