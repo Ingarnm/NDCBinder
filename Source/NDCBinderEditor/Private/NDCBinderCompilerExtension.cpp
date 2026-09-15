@@ -108,6 +108,25 @@ void UNDCBinderCompilerExtension::ProcessBlueprintCompiled(const FKismetCompiler
 	// Off the UBlueprint, not the class being compiled: see the note at the top of this file — the
 	// templates are saved from the purge, and their own classes have nothing to do with this compile,
 	// so both their values and the class their bindings resolve against are the live ones.
+	//
+	// SUSPECTED AND NOT FOUND, recorded so a second look starts further along than the first did.
+	// Note the asymmetry with LookupClass above: the Blueprint being compiled is resolved through its
+	// SKELETON, because the generated class is cleaned out mid-compile and its functions are gone
+	// until they are regenerated; a component template is resolved through its generated class
+	// directly. The worry was a BATCH — Compile All, or compiling something everything depends on —
+	// where the compilation manager takes the whole queue through each stage together: a Blueprint
+	// COMPONENT in the same batch would then have been cleaned before this runs for the Blueprint
+	// holding it, FindFunctionByName would miss a getter that exists, and the holder would fail to
+	// compile over a binding that is fine.
+	//
+	// Looked for across the scenarios that would show it — a Blueprint component class with a bound
+	// getter, placed on a Blueprint actor, compiled singly and in batches that contained both — and no
+	// false error appeared. So either the manager regenerates a dependency's functions before
+	// extensions run for its dependents, or something else orders it safely.
+	//
+	// If one ever does appear, this is the first thing to try: mirror the line above, and when
+	// Owner->GetClass()->ClassGeneratedBy is a UBlueprint, resolve against that Blueprint's
+	// SkeletonGeneratedClass instead — the skeleton is exactly what survives the state this fears.
 	ForEachWriterOnComponentTemplates(
 		Blueprint->SimpleConstructionScript,
 		Blueprint->ComponentTemplates,
