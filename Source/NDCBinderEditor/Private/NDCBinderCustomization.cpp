@@ -1977,27 +1977,31 @@ namespace NDCBinderCustomizationPrivate
 			return (NameHandle.IsValid() && !NameHandle->DiffersFromDefault()) ? RowHandle : nullptr;
 		};
 
+		// The FIELD's handle, captured, and never the one the widget hands back. That parameter is the
+		// anchor the widget was built on, which on a Transient row is the whole ContextBindings ARRAY —
+		// and an earlier version of this read it: the arrow then showed on every such row whenever any
+		// binding anywhere differed, and one click ran ResetToDefault on the array, silently throwing
+		// away every context binding the author had made. Both halves name what they act on.
 		const FResetToDefaultOverride ValueAndBinding = FResetToDefaultOverride::Create(
-			FIsResetToDefaultVisible::CreateLambda([BindingToReset](TSharedPtr<IPropertyHandle> Handle)
+			FIsResetToDefaultVisible::CreateLambda([BindingToReset, FieldHandle](TSharedPtr<IPropertyHandle>)
 			{
-				const bool bValueDiffers = Handle.IsValid() && Handle->DiffersFromDefault();
+				const bool bValueDiffers = FieldHandle.IsValid() && FieldHandle->DiffersFromDefault();
 				return bValueDiffers || BindingToReset().IsValid();
 			}),
-			FResetToDefaultHandler::CreateLambda([BindingToReset](TSharedPtr<IPropertyHandle> Handle)
+			FResetToDefaultHandler::CreateLambda([BindingToReset, FieldHandle](TSharedPtr<IPropertyHandle>)
 			{
 				if (TSharedPtr<IPropertyHandle> BindingRow = BindingToReset())
 				{
 					BindingRow->ResetToDefault();
 				}
-				if (Handle.IsValid() && Handle->DiffersFromDefault())
+				if (FieldHandle.IsValid() && FieldHandle->DiffersFromDefault())
 				{
-					Handle->ResetToDefault();
+					FieldHandle->ResetToDefault();
 				}
 			}));
 
-		//~ The widget needs a handle to hang on, and hands it back to both lambdas above. The field's
-		//~ own where there is one; otherwise the bindings array, which those lambdas ignore — they find
-		//~ their element by name.
+		//~ The widget needs a handle to hang on. The field's own where there is one; otherwise the
+		//~ bindings array, which is now only a peg — nothing above reads what it is given.
 		TSharedPtr<IPropertyHandle> Anchor = FieldHandle.IsValid() ? FieldHandle : Rows;
 		if (!Anchor.IsValid())
 		{
