@@ -4,6 +4,7 @@
 
 #include "Components/SceneComponent.h"
 #include "GameFramework/Actor.h"
+#include "NDCBinder.h"
 
 bool UNDCBinderTestFunctionHost::bWasCalled = false;
 FNDCBinderTestContext UNDCBinderTestFunctionHost::LastContext;
@@ -21,6 +22,28 @@ FVector UNDCBinderTestFunctionHost::RecordAndReturnLocation(const FNDCBinderTest
 {
 	RecordedLocations.Add(EventData.Location);
 	return EventData.Location;
+}
+
+FVector UNDCBinderTestFunctionHost::WriteWhileWriting() const
+{
+	++NumReentrantCalls;
+
+	if (ReentrantWriter && ReentrantWorld)
+	{
+		// The same channel, from inside its own write: the one the guard must refuse.
+		bSameChannelWriteSucceeded = ReentrantWriter->WriteToChannel(ReentrantWorld, this, FConstStructView());
+
+		// And a different one, which nothing is wrong with. Written through a writer of its own so the
+		// only thing the two calls share is the stack they are on.
+		if (OtherChannel)
+		{
+			FNDCBinder Other;
+			Other.DataChannel = OtherChannel;
+			bOtherChannelWriteSucceeded = Other.WriteToChannel(ReentrantWorld, this, FConstStructView());
+		}
+	}
+
+	return FVector(7.0, 8.0, 9.0);
 }
 
 FVector UNDCBinderTestFunctionHost::NoParams() const

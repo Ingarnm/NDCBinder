@@ -148,13 +148,23 @@ namespace NDCBinderPrivate
 		return false;
 	}
 
-	/** Marks a channel as being written. Every push is matched by exactly one pop. */
-	static void PushWritingChannel(const UNiagaraDataChannel* Channel)
+	/**
+	 * Marks a channel as being written. Returns whether it did, having pushed nothing when it did not.
+	 *
+	 * The answer is the caller's to act on, and every caller must: a push that did not happen and a pop
+	 * that does leaves the stack one entry short, and the entry it eats belongs to a write further out
+	 * — which then stops counting as in flight and loses the protection this whole stack exists for.
+	 * That is not hypothetical arithmetic. A one-shot write takes TWO slots, so the last one admitted
+	 * by the check at seven pushes one, fails the other, and pops twice on the way out.
+	 */
+	[[nodiscard]] static bool PushWritingChannel(const UNiagaraDataChannel* Channel)
 	{
-		if (ensure(NumWritingChannels < MaxNestedWrites))
+		if (!ensure(NumWritingChannels < MaxNestedWrites))
 		{
-			WritingChannels[NumWritingChannels++] = Channel;
+			return false;
 		}
+		WritingChannels[NumWritingChannels++] = Channel;
+		return true;
 	}
 
 	static void PopWritingChannel()
@@ -176,10 +186,18 @@ namespace NDCBinderPrivate
 	class FChannelWriteScope
 	{
 	public:
-		explicit FChannelWriteScope(const UNiagaraDataChannel* Channel) { PushWritingChannel(Channel); }
-		~FChannelWriteScope() { PopWritingChannel(); }
+		//~ Pops only what it pushed. The push can fail, and a destructor that popped anyway would take
+		//~ the slot of a write further out; see PushWritingChannel.
+		explicit FChannelWriteScope(const UNiagaraDataChannel* Channel) : bHeld(PushWritingChannel(Channel)) {}
+		~FChannelWriteScope() { if (bHeld) { PopWritingChannel(); } }
 		FChannelWriteScope(const FChannelWriteScope&) = delete;
 		FChannelWriteScope& operator=(const FChannelWriteScope&) = delete;
+
+		/** False when the stack was full, in which case this scope holds nothing. */
+		bool IsHeld() const { return bHeld; }
+
+	private:
+		bool bHeld = false;
 	};
 
 	/**
@@ -304,6 +322,14 @@ namespace NDCBinderPrivate
 					// bitwise alias of the caller's struct is enough, and it saves deep-copying
 					// whatever heap data that struct owns on every single bound call. The parameter
 					// is const, so nothing writes through the alias.
+					//
+					// Destroyed before it is overwritten, and Release will not do it later: an aliased
+					// slot holds the CALLER's memory by then and destroying it would take the caller's
+					// data with it. So whatever the construction above allocated has to go here, while
+					// the slot is still this block's own. Nothing allocates in practice — a
+					// FGameplayCueParameters starts out empty — but "the default happens to be cheap"
+					// is a property of someone else's struct, not of this code.
+					StructProp->DestroyValue_InContainer(Parms);
 					FMemory::Memcpy(Dest, EventData.GetMemory(), StructProp->GetElementSize());
 					AddAliasedParm(StructProp);
 				}
@@ -1746,7 +1772,15 @@ bool FNDCBinder::BeginWriteInternal(FNDCWriteScope& Scope, UWorld* World, FNDCAc
 
 	// Held from here, so a bound function that starts another write on this channel is refused while
 	// this one still owns a slice of its buffer.
-	PushWritingChannel(Channel);
+	//
+	// A refused push is a refused WRITE. The slice above is already taken, so it goes back before
+	// this returns: carrying on with the guard unheld would leave the channel writable from inside
+	// its own write, which is the one thing the guard is for.
+	if (!PushWritingChannel(Channel))
+	{
+		Scope.EndWrite();
+		return false;
+	}
 	Scope.bGuardHeld = true;
 
 	// The rows' buffer indices, resolved against whatever layout this write landed on. Niagara hands

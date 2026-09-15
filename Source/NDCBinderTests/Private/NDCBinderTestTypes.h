@@ -7,6 +7,8 @@
 #include "UObject/StrongObjectPtr.h"
 #include "NDCBinderTestTypes.generated.h"
 
+struct FNDCBinder;
+class UWorld;
 class UNiagaraSystem;
 class UNiagaraDataChannelAsset;
 struct FNiagaraTypeDefinition;
@@ -199,6 +201,26 @@ class UNDCBinderTestFunctionHost : public UObject
 	GENERATED_BODY()
 
 public:
+	/**
+	 * A getter that writes while a write is already in flight, which is what the re-entrancy guard is
+	 * for: author code runs in the middle of a write, and the channel's scratch access context and the
+	 * buffer slice it holds are not re-entrant.
+	 *
+	 * Plain members rather than UPROPERTYs — this is scaffolding for one test, and the objects it
+	 * points at outlive it on that test's stack.
+	 */
+	FNDCBinder* ReentrantWriter = nullptr;
+	UWorld* ReentrantWorld = nullptr;
+	UNiagaraDataChannelAsset* OtherChannel = nullptr;
+
+	/** What the write from inside the write answered, and how many times it was asked. */
+	mutable int32 NumReentrantCalls = 0;
+	mutable bool bSameChannelWriteSucceeded = false;
+	mutable bool bOtherChannelWriteSucceeded = false;
+
+	UFUNCTION()
+	FVector WriteWhileWriting() const;
+
 	//~ The two accepted shapes.
 	UFUNCTION()
 	FVector NoParams() const;

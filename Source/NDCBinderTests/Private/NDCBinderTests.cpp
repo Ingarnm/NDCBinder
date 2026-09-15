@@ -2033,6 +2033,87 @@ bool FNDCBinderEndToEndWriteTest::RunTest(const FString& Parameters)
 
 
 /**
+ * A bound function that writes while its own write is still open.
+ *
+ * The only thing standing between that and Niagara's shared state is the write guard, and nothing
+ * tested it: a channel hands out ONE scratch access context and one writer, so a nested write on the
+ * same channel would fill the outer write's context and take its buffer slice out from under it.
+ *
+ * Both halves matter. Refusing the same channel is the guard's job; letting a DIFFERENT channel
+ * through is the reason it is a per-channel stack rather than a flag, and a guard that refused
+ * everything would pass a test that only checked the first half.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FNDCBinderReentrantWriteTest,
+	"NDCBinder.Write.Reentrancy",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::EngineFilter)
+
+bool FNDCBinderReentrantWriteTest::RunTest(const FString& Parameters)
+{
+	using namespace NDCBinderTestsPrivate;
+
+	UWorld* const World = UWorld::CreateWorld(EWorldType::Game, /*bInformEngineOfWorld=*/ false);
+	if (!World)
+	{
+		AddError(TEXT("could not create a world to write in"));
+		return false;
+	}
+
+	FNiagaraWorldManager* const WorldMan = FNiagaraWorldManager::Get(World);
+	UNiagaraDataChannelAsset* const Asset = MakeChannelAsset({ { TEXT("Position"), FNiagaraTypeDefinition::GetVec3Def() } });
+	UNiagaraDataChannelAsset* const OtherAsset = MakeChannelAsset({ { TEXT("Position"), FNiagaraTypeDefinition::GetVec3Def() } });
+	if (!WorldMan || !Asset || !Asset->Get() || !OtherAsset || !OtherAsset->Get())
+	{
+		AddError(TEXT("could not build the two channels this needs"));
+		World->DestroyWorld(/*bInformEngineOfWorld=*/ false);
+		return false;
+	}
+
+	Asset->AddToRoot();
+	OtherAsset->AddToRoot();
+	WorldMan->InitDataChannel(Asset->Get(), /*bForce=*/ true);
+	WorldMan->InitDataChannel(OtherAsset->Get(), /*bForce=*/ true);
+
+	UNDCBinderTestFunctionHost* const Host = NewObject<UNDCBinderTestFunctionHost>(GetTransientPackage());
+	Host->AddToRoot();
+
+	FNDCBinder Writer = MakeWriter(nullptr);
+	Writer.DataChannel = Asset;
+	Writer.GetMutableBindingsUnchecked().Add(
+		FNDCVariableBinding::MakeFunctionBinding(TEXT("Position"), ENDCVariableType::Vector, TEXT("WriteWhileWriting")));
+
+	Host->ReentrantWriter = &Writer;
+	Host->ReentrantWorld = World;
+	Host->OtherChannel = OtherAsset;
+
+	// The refusal says so out loud, and this both silences the warning and asserts it was said.
+	AddExpectedMessage(TEXT("nested write"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains);
+
+	const bool bOuterWrote = Writer.WriteToChannel(World, Host, FConstStructView());
+
+	TestTrue(TEXT("the outer write goes through"), bOuterWrote);
+	TestEqual(TEXT("and the bound function ran once"), Host->NumReentrantCalls, 1);
+	TestFalse(TEXT("a write to the same channel from inside it is refused"), Host->bSameChannelWriteSucceeded);
+	TestTrue(TEXT("while another channel is not"), Host->bOtherChannelWriteSucceeded);
+
+	// And the guard let go of both afterwards: a second write on either would be refused as nested if
+	// a slot had been left behind, which is what a push and a pop that disagree would do.
+	Host->ReentrantWriter = nullptr;
+	Host->ReentrantWorld = nullptr;
+	Host->OtherChannel = nullptr;
+	TestTrue(TEXT("the channel is writable again once the write is over"),
+		Writer.WriteToChannel(World, Host, FConstStructView()));
+
+	Host->RemoveFromRoot();
+	Asset->RemoveFromRoot();
+	OtherAsset->RemoveFromRoot();
+	WorldMan->RemoveDataChannel(Asset->Get());
+	WorldMan->RemoveDataChannel(OtherAsset->Get());
+	World->DestroyWorld(/*bInformEngineOfWorld=*/ false);
+	return true;
+}
+
+/**
  * Many elements in one write, from C++ and from the node a Blueprint would use.
  *
  * What has to be true for a batch to be worth anything is that each element gets its OWN event data —
